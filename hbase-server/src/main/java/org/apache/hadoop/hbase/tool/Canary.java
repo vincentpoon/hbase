@@ -23,6 +23,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -44,6 +45,7 @@ import org.apache.commons.lang.time.StopWatch;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.AuthUtil;
 import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.ClusterStatus;
@@ -77,9 +79,12 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.hbase.util.RegionSplitter;
+import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.zookeeper.KeeperException;
 
 /**
  * HBase Canary Tool, that that can be used to do
@@ -93,6 +98,8 @@ import org.apache.hadoop.util.ToolRunner;
  * selected randomly and outputs some information about failure or latency.
  */
 public final class Canary implements Tool {
+  public static final String CANARY_TOOL = "CANARY_TOOL";
+
   // Sink interface used by the canary to outputs information
   public interface Sink {
     public long getReadFailureCount();
@@ -590,7 +597,7 @@ public final class Canary implements Tool {
     // for more details.
     final ScheduledChore authChore = AuthUtil.getAuthChore(conf);
     if (authChore != null) {
-      choreService = new ChoreService("CANARY_TOOL");
+      choreService = new ChoreService(CANARY_TOOL);
       choreService.scheduleChore(authChore);
     }
 
@@ -1106,7 +1113,9 @@ public final class Canary implements Tool {
         String serverName = entry.getKey();
         AtomicLong successes = new AtomicLong(0);
         successMap.put(serverName, successes);
-        if (this.allRegions) {
+        if (entry.getValue().isEmpty()) {
+          LOG.error(String.format("Regionserver not serving any regions - %s", serverName));
+        } else if (this.allRegions) {
           for (HRegionInfo region : entry.getValue()) {
             tasks.add(new RegionServerTask(this.connection,
                 serverName,
@@ -1182,6 +1191,14 @@ public final class Canary implements Tool {
           table.close();
         }
 
+        //get any live regionservers not serving any regions, other than draining servers
+        Set<String> drainingServers = getDrainingServers();
+        for (ServerName rs : this.admin.getClusterStatus().getServers()) {
+          String rsName = rs.getHostname();
+          if (!rsAndRMap.containsKey(rsName) && !drainingServers.contains(rsName)) {
+            rsAndRMap.put(rsName, Collections.<HRegionInfo>emptyList());
+          }
+        }
       } catch (IOException e) {
         String msg = "Get HTables info failed";
         LOG.error(msg, e);
@@ -1197,6 +1214,28 @@ public final class Canary implements Tool {
       }
 
       return rsAndRMap;
+    }
+
+    private Set<String> getDrainingServers() {
+      Configuration conf = this.connection.getConfiguration();
+      String baseZNode = conf.get(HConstants.ZOOKEEPER_ZNODE_PARENT,
+        HConstants.DEFAULT_ZOOKEEPER_ZNODE_PARENT);
+      String drainingZNode = ZKUtil.joinZNode(baseZNode,
+        conf.get("zookeeper.znode.draining.rs", "draining"));
+      Set<String> drainingServers = new HashSet<>();
+      try {
+        ZooKeeperWatcher zkw = new ZooKeeperWatcher(conf, CANARY_TOOL + connection.toString(),
+          null);
+        List<String> servers = ZKUtil.listChildrenNoWatch(zkw, drainingZNode);
+        for (String n : servers) {
+          ServerName sn = ServerName.valueOf(ZKUtil.getNodeName(n));
+          drainingServers.add(sn.getHostname());
+        }
+      } catch (IOException | KeeperException e) {
+        LOG.error("failed to get draining regionservers", e);
+        this.errorCode = INIT_ERROR_EXIT_CODE;
+      }
+      return drainingServers;
     }
 
     private Map<String, List<HRegionInfo>> doFilterRegionServerByName(
