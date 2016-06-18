@@ -270,7 +270,7 @@ public abstract class TestReplicationSourceManager {
     wal.rollWriter();
 
     manager.logPositionAndCleanOldLogs(manager.getSources().get(0).getCurrentPath(),
-        "1", 0, false, false);
+        "1", 0, false);
 
     wal.append(hri,
         new WALKey(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
