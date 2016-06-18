@@ -154,57 +154,50 @@ public class TestWALEntryStream {
     appendToLog();
 
     long oldPos;
-
-    try (WALEntryStream logManager = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
       // There's one edit in the log, read it. Reading past it needs to throw exception
-      assertTrue(logManager.hasNext());
-      WAL.Entry entry = logManager.next();
+      assertTrue(entryStream.hasNext());
+      WAL.Entry entry = entryStream.next();
       assertNotNull(entry);
-      assertFalse(logManager.hasNext());
+      assertFalse(entryStream.hasNext());
       try {
-        entry = logManager.next();
+        entry = entryStream.next();
         fail();
       } catch (NoSuchElementException e) {
         // expected
       }
-      oldPos = logManager.getPosition();
+      oldPos = entryStream.getPosition();
     }
 
     appendToLog();
 
-    try (WALEntryStream logManager = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, oldPos)) {
       // Read the newly added entry, make sure we made progress
-      logManager.setPosition(oldPos);
-      WAL.Entry entry = logManager.next();
-      assertNotEquals(oldPos, logManager.getPosition());
+      WAL.Entry entry = entryStream.next();
+      assertNotEquals(oldPos, entryStream.getPosition());
       assertNotNull(entry);
-      oldPos = logManager.getPosition();
+      oldPos = entryStream.getPosition();
     }
 
     // We rolled but we still should see the end of the first log and get that item
     appendToLog();
     log.rollWriter();
     appendToLog();
-    try (WALEntryStream logManager = new WALEntryStream(walQueue, fs, conf)) {
-      logManager.setPosition(oldPos);
-      WAL.Entry entry = logManager.next();
-      assertNotEquals(oldPos, logManager.getPosition());
+    
+    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, oldPos)) {
+      WAL.Entry entry = entryStream.next();
+      assertNotEquals(oldPos, entryStream.getPosition());
       assertNotNull(entry);
 
       // next item should come from the new log
-      entry = logManager.next();
-      assertNotEquals(oldPos, logManager.getPosition());
+      entry = entryStream.next();
+      assertNotEquals(oldPos, entryStream.getPosition());
       assertNotNull(entry);
 
       // no more entries to read
-      assertFalse(logManager.hasNext());
-      oldPos = logManager.getPosition();
+      assertFalse(entryStream.hasNext());
+      oldPos = entryStream.getPosition();
     }
-
-
-    log.rollWriter();
-
-    
   }
   
   /**
@@ -236,7 +229,7 @@ public class TestWALEntryStream {
   public void testNewEntriesWhileStreaming() throws Exception {
     long lastPosition = 0;
     appendToLog();    
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, 0)) {
       entryStream.next(); // we've hit the end of the stream at this point
       
       // our reader doesn't see this because we opened the reader before these appends
@@ -249,8 +242,7 @@ public class TestWALEntryStream {
       lastPosition = entryStream.getPosition();
     }
     // ...but that's ok as long as our next stream open picks up where we left off
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
-      entryStream.setPosition(lastPosition);
+    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, lastPosition)) {
       assertNotNull(entryStream.next());
       assertNotNull(entryStream.next());
       assertFalse(entryStream.hasNext()); //done
@@ -259,35 +251,55 @@ public class TestWALEntryStream {
   }
   
   @Test
+  public void testEmptyStream() throws Exception {
+    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, 0)) {
+      
+    }
+  }
+  
+  @Test
   public void testReplicationWALEntryBatcher() throws Exception {    
     //only walQueue is used
     //ReplicationSourceWorkerThread replicationSourceWorkerThread = replicationSource.new ReplicationSourceWorkerThread("unused", walQueue, new ReplicationQueueInfo("1"), replicationSource);
     //ReplicationWALEntryBatcher replicationWALEntryBatcher = replicationSourceWorkerThread.new ReplicationWALEntryBatcher();    
     
+    appendToLog();
     //get position after first entry
     long position;
-    appendToLog();
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
-      entryStream.next();
-      position = entryStream.getPosition();
-    }
+    
+//    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+//      entryStream.next();
+//      position = entryStream.getPosition();
+//    }
+//  
     
     try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
       entryStream.next();
       position = entryStream.getPosition();
     }
+
     
     BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue = new LinkedBlockingQueue<>();
     ReplicationWALEntryBatcher batcher = new ReplicationWALEntryBatcher(walQueue, 0, fs, conf, entryBatchQueue , getDummyFilter());
     batcher.start();
+    //Thread.sleep(Integer.MAX_VALUE);
     Pair<List<Entry>, Long> entryBatch = entryBatchQueue.poll(5000, TimeUnit.MILLISECONDS);
     
     assertNotNull(entryBatch);
+
     //entryBatch = entryBatchQueue.poll(5000, TimeUnit.MILLISECONDS);
     //assertNotNull(entryBatch);
     assertEquals(1, entryBatch.getFirst().size());
     assertEquals(position, entryBatch.getSecond().longValue());
+    batcher.setWorkerRunning(false);
+    appendToLog();
+    appendToLog();
+    appendToLog();
+    batcher.setWorkerRunning(true);
     
+    entryBatch = entryBatchQueue.poll(5000, TimeUnit.MILLISECONDS);
+    assertEquals(3, entryBatch.getFirst().size());
+    batcher.setWorkerRunning(false);
   }
 
   private void appendToLog() throws IOException {

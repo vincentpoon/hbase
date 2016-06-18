@@ -2,10 +2,8 @@ package org.apache.hadoop.hbase.replication.regionserver;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.PriorityBlockingQueue;
 
 import org.apache.commons.logging.Log;
@@ -17,11 +15,14 @@ import org.apache.hadoop.hbase.replication.WALEntryFilter;
 import org.apache.hadoop.hbase.replication.regionserver.WALEntryStream.WALEntryStreamRuntimeException;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
-import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 
 // we can probably change this once we have streaming output in addition to input
 // but for now, our replicate() takes a batch, so that's what we create here
+/**
+ * Reads and filters batches of WAL entries into a queue 
+ *
+ */
 public class ReplicationWALEntryBatcher extends Thread {
   private static final Log LOG = LogFactory.getLog(ReplicationSource.class);
   
@@ -29,7 +30,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   private FileSystem fs;
   private Configuration conf;
   // entry batches paired with their log position after reading the batch
-  private BlockingQueue<Pair<List<Entry>, Long>> batchQueue;
+  BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue;
   // max size of each batch - multiply by number of batches to get total
   private long replicationBatchSizeCapacity;
   // max count of each batch - multiply by number of batches to get total
@@ -39,9 +40,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   private WALEntryFilter filter;
   private long sleepForRetries;
   //Indicates whether this particular worker is running
-  private boolean workerRunning = true;
-  BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue;
-
+  private boolean workerRunning = true;  
 
   public ReplicationWALEntryBatcher(PriorityBlockingQueue<Path> logQueue, long startPosition,
       FileSystem fs, Configuration conf, BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue, WALEntryFilter filter) {
@@ -65,24 +64,24 @@ public class ReplicationWALEntryBatcher extends Thread {
         Pair<List<Entry>, Long> batch = readBatch();
         if (batch != null) {
           entryBatchQueue.put(batch);
-        }        
+        } else {
+          Thread.sleep(sleepForRetries);
+        }
       } catch (IOException | WALEntryStreamRuntimeException e) {
         LOG.warn("Failed to read replication entry batch", e);
-        //sleepForRetries("IO Exception while reading replication entry batch", 1);
         Threads.sleep(sleepForRetries);
       } catch (InterruptedException e) {
         LOG.debug("Interrupted while reading replication entry batch", e);
-      }
+      }      
     }
   }
 
   private Pair<List<Entry>, Long> readBatch() throws IOException {       
-    try (WALEntryStream entryStream = new WALEntryStream(logQueue, fs, conf, filter)) {
+    try (WALEntryStream entryStream = new WALEntryStream(logQueue, fs, conf, this.currentPosition, filter)) {
       List<Entry> batch = new ArrayList<>(1);
       int currentSize = 0;
-      entryStream.setPosition(this.currentPosition);      
       while (entryStream.hasNext()) {
-        Entry entry = entryStream.next();
+        Entry entry = entryStream.next();        
         currentSize += entry.getEdit().heapSize();
         batch.add(entry);
         // Stop if too many entries or too big
@@ -93,7 +92,7 @@ public class ReplicationWALEntryBatcher extends Thread {
         }
       }
       
-      Pair<List<Entry>, Long> batchPair = null;
+      Pair<List<Entry>, Long> batchPair = null;      
       if (batch.size() > 0 || this.currentPosition != entryStream.getPosition()) {
         batchPair = new Pair<>(batch, entryStream.getPosition());        
       }

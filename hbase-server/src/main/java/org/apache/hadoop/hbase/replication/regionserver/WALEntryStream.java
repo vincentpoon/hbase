@@ -30,7 +30,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   private FileSystem fs;
   private Configuration conf;
   private WALEntryFilter filter;
-
+  
   /**
    * Create an entry stream over the given queue
    * @param logQueue the queue of WAL paths
@@ -40,7 +40,20 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
    */
   public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf)
       throws IOException {
-    this(logQueue, fs, conf, null);
+    this(logQueue, fs, conf, 0, null);
+  }
+  
+  /**
+   * Create an entry stream over the given queue
+   * @param logQueue the queue of WAL paths
+   * @param fs {@link FileSystem} to use to create {@link Reader} for this stream
+   * @param conf {@link Configuration} to use to create {@link Reader} for this stream
+   * @param startPosition the position in the first WAL to start reading at
+   * @throws IOException
+   */
+  public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf, long startPosition)
+      throws IOException {
+    this(logQueue, fs, conf, startPosition, null);
   }
   
   /**
@@ -48,14 +61,17 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
    * @param logQueue the queue of WAL paths
    * @param fs {@link FileSystem} to use to create {@link Reader} for this stream
    * @param conf {@link Configuration} to use to create {@link Reader} for this stream
-   * @param filter filter to use on this stream
+   * @param filter filter to use on this stream.
+   * @param startPosition the position in the first WAL to start reading at
    * @throws IOException
    */
-  public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf, WALEntryFilter filter) throws IOException {
+  public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf, long startPosition, WALEntryFilter filter) throws IOException {
     this.logQueue = logQueue;
     this.fs = fs;
     this.conf = conf;
     this.filter = filter;
+    this.currentPosition = startPosition;
+    
     tryAdvanceEntry();
   }
 
@@ -120,27 +136,6 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   }
 
   /**
-   * Set the position to start reading at
-   * @param pos
-   * @throws IOException
-   */
-  public void setPosition(long pos) throws IOException {
-    this.currentPosition = pos;
-    seek();
-    tryAdvanceEntry();
-  }
-
-  /**
-   * Advance the reader to the current position
-   * @throws IOException
-   */
-  private void seek() throws IOException {
-    if (this.currentPosition != 0) {
-      this.reader.seek(this.currentPosition);
-    }
-  }
-
-  /**
    * Returns the {@link Path} of the current WAL
    * @return the {@link Path} of the current WAL
    */
@@ -177,9 +172,20 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     readNextAndSetPosition();
     if (currentEntry == null) {
       logQueue.remove();
+      this.currentPosition = 0;
       return true;
     }
     return false;
+  }
+  
+  /**
+   * Advance the reader to the current position
+   * @throws IOException
+   */
+  private void seek() throws IOException {
+    if (this.currentPosition != 0) {
+      this.reader.seek(this.currentPosition);
+    }
   }
   
   private void readNextAndSetPosition() throws IOException {
@@ -211,7 +217,6 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     Path nextPath = logQueue.peek();
     if (nextPath != null) {
       openReader(nextPath);
-      setCurrentPath(nextPath);
       return true;
     }
     return false;
@@ -227,6 +232,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     } else {
       resetReader();
     }
+    seek();
   }
 
   private void resetReader() throws IOException {
