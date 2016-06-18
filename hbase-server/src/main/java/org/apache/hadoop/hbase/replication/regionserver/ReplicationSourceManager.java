@@ -184,12 +184,9 @@ public class ReplicationSourceManager implements ReplicationListener {
    * @param holdLogInZK if true then the log is retained in ZK
    */
   public void logPositionAndCleanOldLogs(Path log, String id, long position,
-      boolean queueRecovered, boolean holdLogInZK) {
+      boolean queueRecovered) {
     String fileName = log.getName();
     this.replicationQueues.setLogPosition(id, fileName, position);
-    if (holdLogInZK) {
-     return;
-    }
     cleanOldLogs(fileName, id, queueRecovered);
   }
 
