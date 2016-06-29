@@ -513,8 +513,7 @@ public class ReplicationSource extends Thread
     // Indicates whether this particular worker is running
     private boolean workerRunning = true;
     // Current number of hfiles that we need to replicate
-    private long currentNbHFiles = 0;
-    private BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue = new LinkedBlockingQueue<>(1);
+    private long currentNbHFiles = 0;    
     ReplicationWALEntryBatcher batcher;
 
     public ReplicationSourceWorkerThread(String walGroupId,
@@ -554,7 +553,7 @@ public class ReplicationSource extends Thread
       // /start a background thread to read and batch entries
       ArrayList<WALEntryFilter> filters = Lists.newArrayList(new ReplicationClusterMarkingEntryFilter(), walEntryFilter);
       ChainWALEntryFilter batcherFilter = new ChainWALEntryFilter(filters);
-      ReplicationWALEntryBatcher replicationWALEntryBatcher = new ReplicationWALEntryBatcher(queue, startPosition, fs, conf, entryBatchQueue, batcherFilter);
+      ReplicationWALEntryBatcher replicationWALEntryBatcher = new ReplicationWALEntryBatcher(queue, startPosition, fs, conf, batcherFilter);
       
       replicationWALEntryBatcher.start();
       
@@ -615,7 +614,7 @@ public class ReplicationSource extends Thread
         List<WAL.Entry> entries = Collections.emptyList();
         currentSize = 0;
         try {
-          Pair<List<Entry>, Long> batchPair = entryBatchQueue.poll(sleepForRetries, TimeUnit.MILLISECONDS);
+          Pair<List<Entry>, Long> batchPair = batcher.poll(sleepForRetries, TimeUnit.MILLISECONDS);
           entries = batchPair.getFirst();
 //          if (readAllEntriesToReplicateOrNextFile(currentWALisBeingWrittenTo, entries)) {
 //            continue;

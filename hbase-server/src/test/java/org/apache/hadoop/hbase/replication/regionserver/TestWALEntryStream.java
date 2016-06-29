@@ -9,7 +9,6 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.NavigableMap;
 import java.util.NoSuchElementException;
@@ -259,45 +258,31 @@ public class TestWALEntryStream {
   
   @Test
   public void testReplicationWALEntryBatcher() throws Exception {    
-    //only walQueue is used
-    //ReplicationSourceWorkerThread replicationSourceWorkerThread = replicationSource.new ReplicationSourceWorkerThread("unused", walQueue, new ReplicationQueueInfo("1"), replicationSource);
-    //ReplicationWALEntryBatcher replicationWALEntryBatcher = replicationSourceWorkerThread.new ReplicationWALEntryBatcher();    
-    
     appendToLog();
-    //get position after first entry
+    // get position after first entry
     long position;
-    
-//    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
-//      entryStream.next();
-//      position = entryStream.getPosition();
-//    }
-//  
-    
     try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
       entryStream.next();
       position = entryStream.getPosition();
     }
 
-    
-    BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue = new LinkedBlockingQueue<>();
-    ReplicationWALEntryBatcher batcher = new ReplicationWALEntryBatcher(walQueue, 0, fs, conf, entryBatchQueue , getDummyFilter());
+    // start up a batcher
+    ReplicationWALEntryBatcher batcher = new ReplicationWALEntryBatcher(walQueue, 0, fs, conf , getDummyFilter());
     batcher.start();
-    //Thread.sleep(Integer.MAX_VALUE);
-    Pair<List<Entry>, Long> entryBatch = entryBatchQueue.poll(5000, TimeUnit.MILLISECONDS);
+    Pair<List<Entry>, Long> entryBatch = batcher.poll(1000, TimeUnit.MILLISECONDS);
     
+    // should've batched up our entry
     assertNotNull(entryBatch);
-
-    //entryBatch = entryBatchQueue.poll(5000, TimeUnit.MILLISECONDS);
-    //assertNotNull(entryBatch);
     assertEquals(1, entryBatch.getFirst().size());
     assertEquals(position, entryBatch.getSecond().longValue());
+    
     batcher.setWorkerRunning(false);
     appendToLog();
     appendToLog();
     appendToLog();
     batcher.setWorkerRunning(true);
     
-    entryBatch = entryBatchQueue.poll(5000, TimeUnit.MILLISECONDS);
+    entryBatch = batcher.poll(1000, TimeUnit.MILLISECONDS);
     assertEquals(3, entryBatch.getFirst().size());
     batcher.setWorkerRunning(false);
   }
