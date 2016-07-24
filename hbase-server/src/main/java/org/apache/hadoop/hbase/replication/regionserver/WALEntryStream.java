@@ -1,26 +1,33 @@
 package org.apache.hadoop.hbase.replication.regionserver;
 
 import java.io.IOException;
-import java.util.Iterator;
-import java.util.NoSuchElementException;
+import java.util.*;
 import java.util.concurrent.PriorityBlockingQueue;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
+import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 import org.apache.hadoop.hbase.wal.WAL.Reader;
+import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.WALFactory;
 
 /**
- * Streaming access to WAL entries. This class is given an ordered queue of WAL {@link Path}, and
+ * Streaming access to WAL entries. This class is given a queue of WAL {@link Path}, and
  * continually iterates through all the WAL {@link Entry} in the queue, handling the rolling over of
  * one log to another.
  */
 @InterfaceAudience.Private
 public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<Entry> {
+  private static final Log LOG = LogFactory.getLog(WALEntryStream.class);
+  
   private Reader reader;
   private Path currentPath;
   private Entry currentEntry;
@@ -30,34 +37,38 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   private FileSystem fs;
   private Configuration conf;
   private WALEntryFilter filter;
+  private ReplicationQueueInfo replicationQueueInfo;
   
   /**
    * Create an entry stream over the given queue
+   * @param replicationQueueInfo info for the given queue
    * @param logQueue the queue of WAL paths
    * @param fs {@link FileSystem} to use to create {@link Reader} for this stream
    * @param conf {@link Configuration} to use to create {@link Reader} for this stream
    * @throws IOException
    */
-  public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf)
+  public WALEntryStream(ReplicationQueueInfo replicationQueueInfo, PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf)
       throws IOException {
-    this(logQueue, fs, conf, 0, null);
+    this(replicationQueueInfo, logQueue, fs, conf, 0);
   }
   
   /**
    * Create an entry stream over the given queue
+   * @param replicationQueueInfo info for the given queue
    * @param logQueue the queue of WAL paths
    * @param fs {@link FileSystem} to use to create {@link Reader} for this stream
    * @param conf {@link Configuration} to use to create {@link Reader} for this stream
    * @param startPosition the position in the first WAL to start reading at
    * @throws IOException
    */
-  public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf, long startPosition)
+  public WALEntryStream(ReplicationQueueInfo replicationQueueInfo, PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf, long startPosition)
       throws IOException {
-    this(logQueue, fs, conf, startPosition, null);
+    this(replicationQueueInfo, logQueue, fs, conf, startPosition, null);
   }
   
   /**
    * Create a filtered entry stream over the given queue
+   * @param replicationQueueInfo info for the given queue
    * @param logQueue the queue of WAL paths
    * @param fs {@link FileSystem} to use to create {@link Reader} for this stream
    * @param conf {@link Configuration} to use to create {@link Reader} for this stream
@@ -65,13 +76,15 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
    * @param startPosition the position in the first WAL to start reading at
    * @throws IOException
    */
-  public WALEntryStream(PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf, long startPosition, WALEntryFilter filter) throws IOException {
+  public WALEntryStream(ReplicationQueueInfo replicationQueueInfo, PriorityBlockingQueue<Path> logQueue, FileSystem fs, Configuration conf,
+      long startPosition, WALEntryFilter filter) throws IOException {
+    this.replicationQueueInfo = replicationQueueInfo;
     this.logQueue = logQueue;
     this.fs = fs;
     this.conf = conf;
     this.filter = filter;
     this.currentPosition = startPosition;
-    
+
     tryAdvanceEntry();
   }
 
@@ -149,34 +162,34 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
 
   private void tryAdvanceEntry() throws IOException {
     if (checkReader()) {
-      readNextAndSetPosition();
+      readNextEntryAndSetPosition();
       if (currentEntry == null) { // no more entries in this log file - see if log was rolled
         if (logQueue.size() > 1) { // log was rolled
-          if (tryDequeueCurrentLog()) {
-            openNextLog();
-            readNextAndSetPosition();
-          }                    
+          // Before dequeueing, we should always get one more attempt at reading.
+          // This is in case more entries came in after we opened the reader, 
+          // and a new log was enqueued while we were reading.  See HBASE-6758
+          resetReader();
+          seek();
+          readNextEntryAndSetPosition();
+          if (currentEntry == null) { // now certain we're done with current log
+            dequeueCurrentLog();
+            if (openNextLog()) {
+              readNextEntryAndSetPosition();
+            }
+          }
         }
         // if no other logs, we've simply hit end of current log. do nothing.
       }
     }
     // do nothing if we don't have a WAL Reader (e.g. if there's no logs in queue)
   }
-
-  private boolean tryDequeueCurrentLog() throws IOException {
-    // Before dequeueing, we should always get one more attempt at reading.
-    // This is in case more entries came in after we opened the reader, 
-    // and a new log was enqueued while we were reading.  See HBASE-6758
-    resetReader();
-    seek();
-    readNextAndSetPosition();
-    if (currentEntry == null) {
-      logQueue.remove();
-      this.currentPosition = 0;
-      return true;
-    }
-    return false;
+  
+  private void dequeueCurrentLog() throws IOException {
+    closeReader();
+    logQueue.remove();
+    this.currentPosition = 0;
   }
+
   
   /**
    * Advance the reader to the current position
@@ -188,7 +201,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     }
   }
   
-  private void readNextAndSetPosition() throws IOException {
+  private void readNextEntryAndSetPosition() throws IOException {
     Entry nextEntry = reader.next();    
     if (filter != null) {
       // keep filtering until we get an entry, or we run out of entries to read
@@ -216,11 +229,67 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   private boolean openNextLog() throws IOException {
     Path nextPath = logQueue.peek();
     if (nextPath != null) {
+      if (!this.fs.exists(nextPath)) {
+        if (!this.replicationQueueInfo.isQueueRecovered()) {
+          
+//          if(isLogInDeadRs(nextPath)) return false; //TODO log
+       // If the log was archived, continue reading from there
+          Path rootDir = FSUtils.getRootDir(conf);
+          Path oldLogDir = new Path(rootDir, HConstants.HREGION_OLDLOGDIR_NAME);
+          Path archivedLogLocation =
+              new Path(oldLogDir, nextPath.getName());
+          if (fs.exists(archivedLogLocation)) {
+            nextPath = archivedLogLocation;
+            LOG.info("Log " + nextPath + " was moved to " +
+                archivedLogLocation);
+          }
+        }
+      }
       openReader(nextPath);
       return true;
     }
     return false;
   }
+
+//  /**
+//   * @param nextPath
+//   * @return
+//   */
+//  private boolean isLogInDeadRs(Path nextPath) {
+// 
+//    try {
+//   // We didn't find the log in the archive directory, look if it still
+//      // exists in the dead RS folder (there could be a chain of failures
+//      // to look at) 
+//      List<String> deadRegionServers = this.replicationQueueInfo.getDeadRegionServers();
+//      LOG.info("NB dead servers : " + deadRegionServers.size());
+//      Path rootDir;
+//      rootDir = FSUtils.getRootDir(conf);
+//      for (String curDeadServerName : deadRegionServers) {
+//        final Path deadRsDirectory = new Path(rootDir,
+//          AbstractFSWALProvider.getWALDirectoryName(curDeadServerName));
+//        Path[] locs = new Path[] { new Path(deadRsDirectory, currentPath.getName()),
+//          new Path(deadRsDirectory.suffix(AbstractFSWALProvider.SPLITTING_EXT),
+//            currentPath.getName()) };
+//        for (Path possibleLogLocation : locs) {
+//          LOG.info("Possible location " + possibleLogLocation.toUri().toString());
+//          if (fs.exists(possibleLogLocation)) {
+//            // We found the right new location
+//            LOG.info("Log " + this.currentPath + " still exists at " +
+//                possibleLogLocation);
+//            // Breaking here will make us sleep since reader is null
+//            // TODO why don't we need to set currentPath and call openReader here?
+//
+//            return true;
+//          }
+//        }
+//      }
+//    } catch (IOException e) {
+//      LOG.error("", e);
+//    }
+//
+//    return false;
+//  }
 
   private void openReader(Path path) throws IOException {
     // Detect if this is a new file, if so get a new reader else

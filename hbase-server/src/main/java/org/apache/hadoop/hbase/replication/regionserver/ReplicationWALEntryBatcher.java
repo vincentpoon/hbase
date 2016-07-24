@@ -47,7 +47,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   /**
    * Creates a batcher for a given WAL queue.
    * Reads WAL entries off a given queue, batches the entries, and puts them on a batch queue.
-   * @param logQueue The WAL queue to read off of
+   * @param logQueue The replication WAL queue
    * @param startPosition position in the first WAL to start reading from
    * @param fs
    * @param conf
@@ -97,7 +97,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   }
 
   private Pair<List<Entry>, Long> readBatch() throws IOException {       
-    try (WALEntryStream entryStream = new WALEntryStream(logQueue, fs, conf, this.currentPosition, filter)) {
+    try (WALEntryStream entryStream = new WALEntryStream(null, logQueue, fs, conf, this.currentPosition, filter)) {
       List<Entry> batch = new ArrayList<>(1);
       int currentSize = 0;
       while (entryStream.hasNext()) {

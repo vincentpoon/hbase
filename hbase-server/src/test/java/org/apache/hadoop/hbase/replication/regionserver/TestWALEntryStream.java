@@ -19,8 +19,7 @@ import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.*;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -30,6 +29,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
@@ -126,7 +126,7 @@ public class TestWALEntryStream {
           
           log.rollWriter();
           
-          try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+          try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(), walQueue, fs, conf)) {
             int i = 0;
             for (WAL.Entry e : entryStream) {
               assertNotNull(e);
@@ -153,7 +153,7 @@ public class TestWALEntryStream {
     appendToLog();
 
     long oldPos;
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf)) {
       // There's one edit in the log, read it. Reading past it needs to throw exception
       assertTrue(entryStream.hasNext());
       WAL.Entry entry = entryStream.next();
@@ -170,7 +170,7 @@ public class TestWALEntryStream {
 
     appendToLog();
 
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, oldPos)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, oldPos)) {
       // Read the newly added entry, make sure we made progress
       WAL.Entry entry = entryStream.next();
       assertNotEquals(oldPos, entryStream.getPosition());
@@ -183,7 +183,7 @@ public class TestWALEntryStream {
     log.rollWriter();
     appendToLog();
     
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, oldPos)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, oldPos)) {
       WAL.Entry entry = entryStream.next();
       assertNotEquals(oldPos, entryStream.getPosition());
       assertNotNull(entry);
@@ -207,7 +207,7 @@ public class TestWALEntryStream {
   public void testLogrollWhileStreaming() throws Exception {
     appendToLog(); // 1
     appendToLog();// 2
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf)) {
       appendToLog(); // 3 - our reader doesn't see this because we opened the reader before this append
       log.rollWriter(); // log roll happening while we're reading
       appendToLog(); // 4 - this append is in the rolled log
@@ -228,7 +228,7 @@ public class TestWALEntryStream {
   public void testNewEntriesWhileStreaming() throws Exception {
     long lastPosition = 0;
     appendToLog();    
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, 0)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, 0)) {
       entryStream.next(); // we've hit the end of the stream at this point
       
       // our reader doesn't see this because we opened the reader before these appends
@@ -241,7 +241,7 @@ public class TestWALEntryStream {
       lastPosition = entryStream.getPosition();
     }
     // ...but that's ok as long as our next stream open picks up where we left off
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, lastPosition)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, lastPosition)) {
       assertNotNull(entryStream.next());
       assertNotNull(entryStream.next());
       assertFalse(entryStream.hasNext()); //done
@@ -251,17 +251,24 @@ public class TestWALEntryStream {
   
   @Test
   public void testEmptyStream() throws Exception {
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, 0)) {
+    appendToLog();
+    System.out.println(pathWatcher.currentPath);
+    Path curr = pathWatcher.currentPath;
+    FileStatus[] listStatus = fs.listStatus(curr);
+    for (FileStatus fs : listStatus) {
       
     }
+    //try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, 0)) {    
+    ///}
   }
+
   
   @Test
   public void testReplicationWALEntryBatcher() throws Exception {    
     appendToLog();
     // get position after first entry
     long position;
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf)) {
       entryStream.next();
       position = entryStream.getPosition();
     }
@@ -315,6 +322,10 @@ public class TestWALEntryStream {
         return entry;
       }
     };
+  }
+  
+  private ReplicationQueueInfo getQueueInfo() {
+    return new ReplicationQueueInfo("1");
   }
 
   class PathWatcher extends WALActionsListener.Base {
