@@ -1,51 +1,29 @@
 package org.apache.hadoop.hbase.replication.regionserver;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.NavigableMap;
-import java.util.NoSuchElementException;
-import java.util.TreeMap;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.*;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.fs.*;
+import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
+import org.apache.hadoop.hbase.replication.regionserver.ReplicationWALEntryBatcher.WALEntryBatch;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.*;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
-import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.*;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 
@@ -126,7 +104,7 @@ public class TestWALEntryStream {
           
           log.rollWriter();
           
-          try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+          try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(), walQueue, fs, conf)) {
             int i = 0;
             for (WAL.Entry e : entryStream) {
               assertNotNull(e);
@@ -153,7 +131,7 @@ public class TestWALEntryStream {
     appendToLog();
 
     long oldPos;
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf)) {
       // There's one edit in the log, read it. Reading past it needs to throw exception
       assertTrue(entryStream.hasNext());
       WAL.Entry entry = entryStream.next();
@@ -170,7 +148,7 @@ public class TestWALEntryStream {
 
     appendToLog();
 
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, oldPos)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, oldPos)) {
       // Read the newly added entry, make sure we made progress
       WAL.Entry entry = entryStream.next();
       assertNotEquals(oldPos, entryStream.getPosition());
@@ -183,7 +161,7 @@ public class TestWALEntryStream {
     log.rollWriter();
     appendToLog();
     
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, oldPos)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, oldPos)) {
       WAL.Entry entry = entryStream.next();
       assertNotEquals(oldPos, entryStream.getPosition());
       assertNotNull(entry);
@@ -207,7 +185,7 @@ public class TestWALEntryStream {
   public void testLogrollWhileStreaming() throws Exception {
     appendToLog(); // 1
     appendToLog();// 2
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf)) {
       appendToLog(); // 3 - our reader doesn't see this because we opened the reader before this append
       log.rollWriter(); // log roll happening while we're reading
       appendToLog(); // 4 - this append is in the rolled log
@@ -228,7 +206,7 @@ public class TestWALEntryStream {
   public void testNewEntriesWhileStreaming() throws Exception {
     long lastPosition = 0;
     appendToLog();    
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, 0)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, 0)) {
       entryStream.next(); // we've hit the end of the stream at this point
       
       // our reader doesn't see this because we opened the reader before these appends
@@ -241,7 +219,7 @@ public class TestWALEntryStream {
       lastPosition = entryStream.getPosition();
     }
     // ...but that's ok as long as our next stream open picks up where we left off
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, lastPosition)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, lastPosition)) {
       assertNotNull(entryStream.next());
       assertNotNull(entryStream.next());
       assertFalse(entryStream.hasNext()); //done
@@ -251,30 +229,39 @@ public class TestWALEntryStream {
   
   @Test
   public void testEmptyStream() throws Exception {
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf, 0)) {
+    appendToLog();
+    System.out.println(pathWatcher.currentPath);
+    Path curr = pathWatcher.currentPath;
+    FileStatus[] listStatus = fs.listStatus(curr);
+    for (FileStatus fs : listStatus) {
       
     }
+    //try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf, 0)) {    
+    ///}
   }
+
   
   @Test
   public void testReplicationWALEntryBatcher() throws Exception {    
     appendToLog();
     // get position after first entry
     long position;
-    try (WALEntryStream entryStream = new WALEntryStream(walQueue, fs, conf)) {
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(),walQueue, fs, conf)) {
       entryStream.next();
       position = entryStream.getPosition();
     }
 
     // start up a batcher
-    ReplicationWALEntryBatcher batcher = new ReplicationWALEntryBatcher(walQueue, 0, fs, conf , getDummyFilter());
-    batcher.start();
-    Pair<List<Entry>, Long> entryBatch = batcher.poll(1000, TimeUnit.MILLISECONDS);
+    ReplicationWALEntryBatcher batcher = new ReplicationWALEntryBatcher(getQueueInfo(), walQueue, 0, fs, conf , getDummyFilter());
+    Path walPath = walQueue.peek();
+    batcher.start();    
+    WALEntryBatch entryBatch = batcher.poll(1000, TimeUnit.MILLISECONDS);
     
     // should've batched up our entry
-    assertNotNull(entryBatch);
-    assertEquals(1, entryBatch.getFirst().size());
-    assertEquals(position, entryBatch.getSecond().longValue());
+    assertNotNull(entryBatch);    
+    assertEquals(1, entryBatch.getWalEntries().size());
+    assertEquals(position, entryBatch.getLastWalPosition());
+    assertEquals(walPath, entryBatch.getLastWalPath());
     
     batcher.setWorkerRunning(false);
     appendToLog();
@@ -283,7 +270,7 @@ public class TestWALEntryStream {
     batcher.setWorkerRunning(true);
     
     entryBatch = batcher.poll(1000, TimeUnit.MILLISECONDS);
-    assertEquals(3, entryBatch.getFirst().size());
+    assertEquals(3, entryBatch.getWalEntries().size());
     batcher.setWorkerRunning(false);
   }
 
@@ -315,6 +302,10 @@ public class TestWALEntryStream {
         return entry;
       }
     };
+  }
+  
+  private ReplicationQueueInfo getQueueInfo() {
+    return new ReplicationQueueInfo("1");
   }
 
   class PathWatcher extends WALActionsListener.Base {

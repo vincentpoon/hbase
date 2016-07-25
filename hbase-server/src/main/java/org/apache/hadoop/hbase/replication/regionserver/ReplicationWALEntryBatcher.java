@@ -13,6 +13,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
 import org.apache.hadoop.hbase.replication.regionserver.WALEntryStream.WALEntryStreamRuntimeException;
 import org.apache.hadoop.hbase.util.Pair;
@@ -32,7 +33,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   private FileSystem fs;
   private Configuration conf;
   // entry batches paired with the ending log position of the batch
-  private BlockingQueue<Pair<List<Entry>, Long>> entryBatchQueue = new LinkedBlockingQueue<>(1);
+  private BlockingQueue<WALEntryBatch> entryBatchQueue = new LinkedBlockingQueue<>(1);
   // max size of each batch - multiply by number of batches to get total
   private long replicationBatchSizeCapacity;
   // max count of each batch - multiply by number of batches to get total
@@ -44,9 +45,51 @@ public class ReplicationWALEntryBatcher extends Thread {
   //Indicates whether this particular worker is running
   private boolean workerRunning = true;
 
+  private ReplicationQueueInfo replicationQueueInfo;
+  
+  public static class WALEntryBatch {
+    private List<Entry> walEntries;
+    private Path lastWalPath;
+    private long lastWalPosition;
+    
+    /**
+     * @param walEntries
+     * @param lastWalPath
+     * @param lastWalPosition
+     */
+    public WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition) {
+      this.walEntries = walEntries;
+      this.lastWalPath = lastWalPath;
+      this.lastWalPosition = lastWalPosition;
+    }
+
+    /**
+     * @return Returns the walEntries.
+     */
+    public List<Entry> getWalEntries() {
+      return walEntries;
+    }
+
+    /**
+     * @return Returns the path of the last WAL that was read.
+     */
+    public Path getLastWalPath() {
+      return lastWalPath;
+    }
+
+    /**
+     * @return Returns the position in the last WAL that was read.
+     */
+    public long getLastWalPosition() {
+      return lastWalPosition;
+    }
+
+  }
+
   /**
    * Creates a batcher for a given WAL queue.
    * Reads WAL entries off a given queue, batches the entries, and puts them on a batch queue.
+   * @param replicationQueueInfo 
    * @param logQueue The WAL queue to read off of
    * @param startPosition position in the first WAL to start reading from
    * @param fs
@@ -54,8 +97,9 @@ public class ReplicationWALEntryBatcher extends Thread {
    * @param entryBatchQueue The queue of entry batches that this batcher will write to
    * @param filter The filter to use while reading
    */
-  public ReplicationWALEntryBatcher(PriorityBlockingQueue<Path> logQueue, long startPosition,
+  public ReplicationWALEntryBatcher(ReplicationQueueInfo replicationQueueInfo, PriorityBlockingQueue<Path> logQueue, long startPosition,
       FileSystem fs, Configuration conf, WALEntryFilter filter) {
+    this.replicationQueueInfo = replicationQueueInfo;
     this.logQueue = logQueue;
     this.currentPosition = startPosition;
     this.fs = fs;
@@ -72,10 +116,11 @@ public class ReplicationWALEntryBatcher extends Thread {
   public void run() {
     while (isWorkerRunning()) {
       try {
-        Pair<List<Entry>, Long> batch = readBatch();
+        WALEntryBatch batch = readBatch();
         if (batch != null) {
           entryBatchQueue.put(batch);
         } else {
+          LOG.debug("Didn't read any new entries from WAL");
           Thread.sleep(sleepForRetries);
         }
       } catch (IOException | WALEntryStreamRuntimeException e) {
@@ -92,32 +137,34 @@ public class ReplicationWALEntryBatcher extends Thread {
    * @return A batch of entries, along with the position in the log after reading the batch
    * @throws InterruptedException if interrupted while waiting
    */
-  public Pair<List<Entry>, Long> poll(long timeout, TimeUnit unit) throws InterruptedException {
+  public WALEntryBatch poll(long timeout, TimeUnit unit) throws InterruptedException {
     return entryBatchQueue.poll(timeout, unit);
   }
 
-  private Pair<List<Entry>, Long> readBatch() throws IOException {       
-    try (WALEntryStream entryStream = new WALEntryStream(logQueue, fs, conf, this.currentPosition, filter)) {
-      List<Entry> batch = new ArrayList<>(1);
+  private WALEntryBatch readBatch() throws IOException {       
+    try (WALEntryStream entryStream = new WALEntryStream(replicationQueueInfo, logQueue, fs, conf, this.currentPosition, filter)) {
+      List<Entry> entries = new ArrayList<>(1);
       int currentSize = 0;
       while (entryStream.hasNext()) {
         Entry entry = entryStream.next();        
         currentSize += entry.getEdit().heapSize();
-        batch.add(entry);
+        entries.add(entry);
         // Stop if too many entries or too big
         // FIXME check the relationship between single wal group and overall
         if (currentSize >= replicationBatchNbCapacity
-            || batch.size() >= replicationBatchSizeCapacity) {
+            || entries.size() >= replicationBatchSizeCapacity) {
           break;
         }
       }
       
-      Pair<List<Entry>, Long> batchPair = null;      
-      if (batch.size() > 0 || this.currentPosition != entryStream.getPosition()) {
-        batchPair = new Pair<>(batch, entryStream.getPosition());        
+      WALEntryBatch batch = null;
+      currentPosition = entryStream.getPosition();
+      
+      if (entries.size() > 0 || this.currentPosition != entryStream.getPosition()) {
+        batch = new WALEntryBatch(entries, entryStream.getCurrentPath(), currentPosition);
       }
-      this.currentPosition = entryStream.getPosition();
-      return batchPair;      
+      
+      return batch;      
     }
   }
 

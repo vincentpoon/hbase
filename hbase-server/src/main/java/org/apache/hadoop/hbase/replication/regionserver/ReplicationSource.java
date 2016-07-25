@@ -66,6 +66,7 @@ import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.ReplicationQueues;
 import org.apache.hadoop.hbase.replication.SystemTableWALEntryFilter;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
+import org.apache.hadoop.hbase.replication.regionserver.ReplicationWALEntryBatcher.WALEntryBatch;
 import org.apache.hadoop.hbase.replication.regionserver.WALEntryStream.WALEntryStreamRuntimeException;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
@@ -553,7 +554,7 @@ public class ReplicationSource extends Thread
       // /start a background thread to read and batch entries
       ArrayList<WALEntryFilter> filters = Lists.newArrayList(new ReplicationClusterMarkingEntryFilter(), walEntryFilter);
       ChainWALEntryFilter batcherFilter = new ChainWALEntryFilter(filters);
-      ReplicationWALEntryBatcher replicationWALEntryBatcher = new ReplicationWALEntryBatcher(queue, startPosition, fs, conf, batcherFilter);
+      ReplicationWALEntryBatcher replicationWALEntryBatcher = new ReplicationWALEntryBatcher(replicationQueueInfo, queue, startPosition, fs, conf, batcherFilter);
       
       replicationWALEntryBatcher.start();
       
@@ -567,20 +568,20 @@ public class ReplicationSource extends Thread
           }
           continue;
         }
-        Path oldPath = getCurrentPath(); //note that in the current scenario,
+//        Path oldPath = getCurrentPath(); //note that in the current scenario,
                                          //oldPath will be null when a log roll
                                          //happens.
         // Get a new path
-        boolean hasCurrentPath = getNextPath();
-        if (getCurrentPath() != null && oldPath == null) {
-          sleepMultiplier = 1; //reset the sleepMultiplier on a path change
-        }
-        if (!hasCurrentPath) {
-          if (sleepForRetries("No log to process", sleepMultiplier)) {
-            sleepMultiplier++;
-          }
-          continue;
-        }
+//        boolean hasCurrentPath = getNextPath();
+//        if (getCurrentPath() != null && oldPath == null) {
+//          sleepMultiplier = 1; //reset the sleepMultiplier on a path change
+//        }
+//        if (!hasCurrentPath) {
+//          if (sleepForRetries("No log to process", sleepMultiplier)) {
+//            sleepMultiplier++;
+//          }
+//          continue;
+//        }
         //boolean currentWALisBeingWrittenTo = false;
         //For WAL files we own (rather than recovered), take a snapshot of whether the
         //current WAL file (this.currentPath) is in use (for writing) NOW!
@@ -594,19 +595,19 @@ public class ReplicationSource extends Thread
          // currentWALisBeingWrittenTo = true;
         //}
         // Open a reader on it
-        if (!openReader(sleepMultiplier)) {
+//        if (!openReader(sleepMultiplier)) {
           // Reset the sleep multiplier, else it'd be reused for the next file
-          sleepMultiplier = 1;
-          continue;
-        }
+//          sleepMultiplier = 1;
+//          continue;
+//        }
 
         // If we got a null reader but didn't continue, then sleep and continue
-        if (this.reader == null) {
-          if (sleepForRetries("Unable to open a reader", sleepMultiplier)) {
-            sleepMultiplier++;
-          }
-          continue;
-        }
+//        if (this.reader == null) {
+//          if (sleepForRetries("Unable to open a reader", sleepMultiplier)) {
+//            sleepMultiplier++;
+//          }
+//          continue;
+//        }
 
         boolean gotIOE = false;
         currentNbOperations = 0;
@@ -614,13 +615,22 @@ public class ReplicationSource extends Thread
         List<WAL.Entry> entries = Collections.emptyList();
         currentSize = 0;
         try {
-          Pair<List<Entry>, Long> batchPair = batcher.poll(sleepForRetries, TimeUnit.MILLISECONDS);
-          entries = batchPair.getFirst();
+          WALEntryBatch entryBatch = batcher.poll(sleepForRetries, TimeUnit.MILLISECONDS);
+          if (entryBatch == null) {
+            LOG.debug("No WAL entries to replicate");
+            continue;
+          }
+          shipEdits(entryBatch);
+          
+
+                    
+
+          
 //          if (readAllEntriesToReplicateOrNextFile(currentWALisBeingWrittenTo, entries)) {
 //            continue;
 //          }
         } catch (InterruptedException e) {
-          
+          LOG.warn("Interrupted while dequeuing next replication entry batch", e);
         }
 //        catch (IOException ioe) {
 //          LOG.warn(peerClusterZnode + " Got: ", ioe);
@@ -661,27 +671,27 @@ public class ReplicationSource extends Thread
         // If we didn't get anything to replicate, or if we hit a IOE,
         // wait a bit and retry.
         // But if we need to stop, don't bother sleeping
-        if (isWorkerActive() && (gotIOE || entries.isEmpty())) {
-          if (this.lastLoggedPosition != this.repLogReader.getPosition()) {
-            manager.logPositionAndCleanOldLogs(this.currentPath,
-                peerClusterZnode, this.repLogReader.getPosition(),
-                this.replicationQueueInfo.isQueueRecovered());
-            this.lastLoggedPosition = this.repLogReader.getPosition();
-          }
-          // Reset the sleep multiplier if nothing has actually gone wrong
-          if (!gotIOE) {
-            sleepMultiplier = 1;
-            // if there was nothing to ship and it's not an error
-            // set "ageOfLastShippedOp" to <now> to indicate that we're current
-            metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
-          }
-          if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
-            sleepMultiplier++;
-          }
-          continue;
-        }
-        sleepMultiplier = 1;
-        shipEdits(entries);
+//        if (isWorkerActive() && (gotIOE || entries.isEmpty())) {
+//          if (this.lastLoggedPosition != this.repLogReader.getPosition()) {
+//            manager.logPositionAndCleanOldLogs(this.currentPath,
+//                peerClusterZnode, this.repLogReader.getPosition(),
+//                this.replicationQueueInfo.isQueueRecovered());
+//            this.lastLoggedPosition = this.repLogReader.getPosition();
+//          }
+//          // Reset the sleep multiplier if nothing has actually gone wrong
+//          if (!gotIOE) {
+//            sleepMultiplier = 1;
+//            // if there was nothing to ship and it's not an error
+//            // set "ageOfLastShippedOp" to <now> to indicate that we're current
+//            metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
+//          }
+//          if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
+//            sleepMultiplier++;
+//          }
+//          continue;
+//        }
+//        sleepMultiplier = 1;
+        
       }
       
       if (replicationQueueInfo.isQueueRecovered()) {
@@ -1026,12 +1036,33 @@ public class ReplicationSource extends Thread
      * Do the shipping logic
      * written to when this method was called
      */
-    protected void shipEdits(List<WAL.Entry> entries) {
+    protected void shipEdits(WALEntryBatch entryBatch) {
       int sleepMultiplier = 0;
-      if (entries.isEmpty()) {
-        LOG.warn("Was given 0 edits to ship");
+      List<Entry> entries = entryBatch.getWalEntries();
+      long lastReadPosition = entryBatch.getLastWalPosition();
+      if (entryBatch == null || entries.isEmpty()) {
+        // we made progress in the WAL but all entries were filtered
+        if (lastLoggedPosition != lastReadPosition) {
+          manager.logPositionAndCleanOldLogs(entryBatch.getLastWalPath(),
+            peerClusterZnode, lastReadPosition,
+            this.replicationQueueInfo.isQueueRecovered());
+          this.lastLoggedPosition = lastReadPosition;
+        }          
+        
+        // if there was nothing to ship and it's not an error
+        // set "ageOfLastShippedOp" to <now> to indicate that we're current
+        metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
+        if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
+          sleepMultiplier++;
+        }
         return;
       }
+      
+      
+//      if (entries.isEmpty()) {
+//        LOG.warn("Was given 0 edits to ship");
+//        return;
+//      }
       while (isWorkerActive()) {
         try {
           if (throttler.isEnabled()) {
