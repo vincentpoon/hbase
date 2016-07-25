@@ -472,12 +472,12 @@ public class ReplicationSource extends Thread
     for (Map.Entry<String, ReplicationSourceWorkerThread> entry : workerThreads.entrySet()) {
       String walGroupId = entry.getKey();
       ReplicationSourceWorkerThread worker = entry.getValue();
-//      long position = worker.getCurrentPosition();
+      long position = worker.getCurrentPosition();
       Path currentPath = worker.getCurrentPath();
       sb.append("walGroup [").append(walGroupId).append("]: ");
       if (currentPath != null) {
-//        sb.append("currently replicating from: ").append(currentPath).append(" at position: ")
-//            .append(position).append("\n");
+        sb.append("currently replicating from: ").append(currentPath).append(" at position: ")
+            .append(position).append("\n");
       } else {
         sb.append("no replication ongoing, waiting for new log");
       }
@@ -505,7 +505,7 @@ public class ReplicationSource extends Thread
     // Path of the current log
     private volatile Path currentPath;
     // Handle on the log reader helper
-//    private ReplicationWALReaderManager repLogReader;
+    private ReplicationWALReaderManager repLogReader;
     // Current number of operations (Put/Delete) that we need to replicate
     private int currentNbOperations = 0;
     // Current size of data we need to replicate
@@ -522,7 +522,7 @@ public class ReplicationSource extends Thread
       this.walGroupId = walGroupId;
       this.queue = queue;
       this.replicationQueueInfo = replicationQueueInfo;
-//      this.repLogReader = new ReplicationWALReaderManager(fs, conf);
+      this.repLogReader = new ReplicationWALReaderManager(fs, conf);
       this.source = source;            
     }
     
@@ -543,7 +543,7 @@ public class ReplicationSource extends Thread
             this.queue.peek().getName()));
           if (LOG.isTraceEnabled()) {
             LOG.trace("Recovered queue started with log " + this.queue.peek() + " at position "
-                + startPosition);
+                + this.repLogReader.getPosition());
           }
         } catch (ReplicationException e) {
           terminate("Couldn't get the position of this recovered queue " + peerClusterZnode, e);
@@ -567,20 +567,20 @@ public class ReplicationSource extends Thread
           }
           continue;
         }
-//        Path oldPath = getCurrentPath(); //note that in the current scenario,
-//                                         //oldPath will be null when a log roll
-//                                         //happens.
-//        // Get a new path
-//        boolean hasCurrentPath = getNextPath();
-//        if (getCurrentPath() != null && oldPath == null) {
-//          sleepMultiplier = 1; //reset the sleepMultiplier on a path change
-//        }
-//        if (!hasCurrentPath) {
-//          if (sleepForRetries("No log to process", sleepMultiplier)) {
-//            sleepMultiplier++;
-//          }
-//          continue;
-//        }
+        Path oldPath = getCurrentPath(); //note that in the current scenario,
+                                         //oldPath will be null when a log roll
+                                         //happens.
+        // Get a new path
+        boolean hasCurrentPath = getNextPath();
+        if (getCurrentPath() != null && oldPath == null) {
+          sleepMultiplier = 1; //reset the sleepMultiplier on a path change
+        }
+        if (!hasCurrentPath) {
+          if (sleepForRetries("No log to process", sleepMultiplier)) {
+            sleepMultiplier++;
+          }
+          continue;
+        }
         //boolean currentWALisBeingWrittenTo = false;
         //For WAL files we own (rather than recovered), take a snapshot of whether the
         //current WAL file (this.currentPath) is in use (for writing) NOW!
@@ -594,11 +594,11 @@ public class ReplicationSource extends Thread
          // currentWALisBeingWrittenTo = true;
         //}
         // Open a reader on it
-//        if (!openReader(sleepMultiplier)) {
-//          // Reset the sleep multiplier, else it'd be reused for the next file
-//          sleepMultiplier = 1;
-//          continue;
-//        }
+        if (!openReader(sleepMultiplier)) {
+          // Reset the sleep multiplier, else it'd be reused for the next file
+          sleepMultiplier = 1;
+          continue;
+        }
 
         // If we got a null reader but didn't continue, then sleep and continue
         if (this.reader == null) {
@@ -661,25 +661,25 @@ public class ReplicationSource extends Thread
         // If we didn't get anything to replicate, or if we hit a IOE,
         // wait a bit and retry.
         // But if we need to stop, don't bother sleeping
-//        if (isWorkerActive() && (gotIOE || entries.isEmpty())) {
-//          if (this.lastLoggedPosition != this.repLogReader.getPosition()) {
-//            manager.logPositionAndCleanOldLogs(this.currentPath,
-//                peerClusterZnode, this.repLogReader.getPosition(),
-//                this.replicationQueueInfo.isQueueRecovered());
-//            this.lastLoggedPosition = this.repLogReader.getPosition();
-//          }
-//          // Reset the sleep multiplier if nothing has actually gone wrong
-//          if (!gotIOE) {
-//            sleepMultiplier = 1;
-//            // if there was nothing to ship and it's not an error
-//            // set "ageOfLastShippedOp" to <now> to indicate that we're current
-//            metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
-//          }
-//          if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
-//            sleepMultiplier++;
-//          }
-//          continue;
-//        }
+        if (isWorkerActive() && (gotIOE || entries.isEmpty())) {
+          if (this.lastLoggedPosition != this.repLogReader.getPosition()) {
+            manager.logPositionAndCleanOldLogs(this.currentPath,
+                peerClusterZnode, this.repLogReader.getPosition(),
+                this.replicationQueueInfo.isQueueRecovered());
+            this.lastLoggedPosition = this.repLogReader.getPosition();
+          }
+          // Reset the sleep multiplier if nothing has actually gone wrong
+          if (!gotIOE) {
+            sleepMultiplier = 1;
+            // if there was nothing to ship and it's not an error
+            // set "ageOfLastShippedOp" to <now> to indicate that we're current
+            metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
+          }
+          if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
+            sleepMultiplier++;
+          }
+          continue;
+        }
         sleepMultiplier = 1;
         shipEdits(entries);
       }
@@ -712,64 +712,64 @@ public class ReplicationSource extends Thread
      * @return true if we got nothing and went to the next file, false if we got entries
      * @throws IOException
      */
-//    protected boolean readAllEntriesToReplicateOrNextFile(boolean currentWALisBeingWrittenTo,
-//        List<WAL.Entry> entries) throws IOException {
-//      long seenEntries = 0;
-//      if (LOG.isTraceEnabled()) {
-//        LOG.trace("Seeking in " + this.currentPath + " at position "
-//            + this.repLogReader.getPosition());
-//      }
-//      this.repLogReader.seek();
-//      long positionBeforeRead = this.repLogReader.getPosition();
-//      WAL.Entry entry = this.repLogReader.readNextAndSetPosition();
-//      while (entry != null) {
-//        metrics.incrLogEditsRead();
-//        seenEntries++;
-//
-//        // don't replicate if the log entries have already been consumed by the cluster
-//        if (replicationEndpoint.canReplicateToSameCluster()
-//            || !entry.getKey().getClusterIds().contains(peerClusterId)) {
-//          // Remove all KVs that should not be replicated
-//          entry = walEntryFilter.filter(entry);
-//          WALEdit edit = null;
-//          WALKey logKey = null;
-//          if (entry != null) {
-//            edit = entry.getEdit();
-//            logKey = entry.getKey();
-//          }
-//
-//          if (edit != null && edit.size() != 0) {
-//            // Mark that the current cluster has the change
-//            logKey.addClusterId(clusterId);
-//            currentNbOperations += countDistinctRowKeys(edit);
-//            entries.add(entry);
-//            currentSize += entry.getEdit().heapSize();
-//            currentSize += calculateTotalSizeOfStoreFiles(edit);
-//          } else {
-//            metrics.incrLogEditsFiltered();
-//          }
-//        }
-//        // Stop if too many entries or too big
-//        // FIXME check the relationship between single wal group and overall
-//        if (currentSize >= replicationQueueSizeCapacity
-//            || entries.size() >= replicationQueueNbCapacity) {
-//          break;
-//        }
-//        try {
-//          entry = this.repLogReader.readNextAndSetPosition();
-//        } catch (IOException ie) {
-//          LOG.debug("Break on IOE: " + ie.getMessage());
-//          break;
-//        }
-//      }
-//      metrics.incrLogReadInBytes(this.repLogReader.getPosition() - positionBeforeRead);
-//      if (currentWALisBeingWrittenTo) {
-//        return false;
-//      }
-//      // If we didn't get anything and the queue has an object, it means we
-//      // hit the end of the file for sure
-//      return seenEntries == 0 && processEndOfFile();
-//    }
+    protected boolean readAllEntriesToReplicateOrNextFile(boolean currentWALisBeingWrittenTo,
+        List<WAL.Entry> entries) throws IOException {
+      long seenEntries = 0;
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("Seeking in " + this.currentPath + " at position "
+            + this.repLogReader.getPosition());
+      }
+      this.repLogReader.seek();
+      long positionBeforeRead = this.repLogReader.getPosition();
+      WAL.Entry entry = this.repLogReader.readNextAndSetPosition();
+      while (entry != null) {
+        metrics.incrLogEditsRead();
+        seenEntries++;
+
+        // don't replicate if the log entries have already been consumed by the cluster
+        if (replicationEndpoint.canReplicateToSameCluster()
+            || !entry.getKey().getClusterIds().contains(peerClusterId)) {
+          // Remove all KVs that should not be replicated
+          entry = walEntryFilter.filter(entry);
+          WALEdit edit = null;
+          WALKey logKey = null;
+          if (entry != null) {
+            edit = entry.getEdit();
+            logKey = entry.getKey();
+          }
+
+          if (edit != null && edit.size() != 0) {
+            // Mark that the current cluster has the change
+            logKey.addClusterId(clusterId);
+            currentNbOperations += countDistinctRowKeys(edit);
+            entries.add(entry);
+            currentSize += entry.getEdit().heapSize();
+            currentSize += calculateTotalSizeOfStoreFiles(edit);
+          } else {
+            metrics.incrLogEditsFiltered();
+          }
+        }
+        // Stop if too many entries or too big
+        // FIXME check the relationship between single wal group and overall
+        if (currentSize >= replicationQueueSizeCapacity
+            || entries.size() >= replicationQueueNbCapacity) {
+          break;
+        }
+        try {
+          entry = this.repLogReader.readNextAndSetPosition();
+        } catch (IOException ie) {
+          LOG.debug("Break on IOE: " + ie.getMessage());
+          break;
+        }
+      }
+      metrics.incrLogReadInBytes(this.repLogReader.getPosition() - positionBeforeRead);
+      if (currentWALisBeingWrittenTo) {
+        return false;
+      }
+      // If we didn't get anything and the queue has an object, it means we
+      // hit the end of the file for sure
+      return seenEntries == 0 && processEndOfFile();
+    }
 
     /**
      * Calculate the total size of all the store files
@@ -854,109 +854,108 @@ public class ReplicationSource extends Thread
      * @param sleepMultiplier by how many times the default sleeping time is augmented
      * @return true if we should continue with that file, false if we are over with it
      */
-//    protected boolean openReader(int sleepMultiplier) {
-//      try {
-//        try {
-//          if (LOG.isTraceEnabled()) {
-//            LOG.trace("Opening log " + this.currentPath);
-//          }
-//          this.reader = repLogReader.openReader(this.currentPath);
-//        } catch (FileNotFoundException fnfe) {
-//          if (this.replicationQueueInfo.isQueueRecovered()) {
-//            // We didn't find the log in the archive directory, look if it still
-//            // exists in the dead RS folder (there could be a chain of failures
-//            // to look at) 
-//            List<String> deadRegionServers = this.replicationQueueInfo.getDeadRegionServers();
-//            LOG.info("NB dead servers : " + deadRegionServers.size());
-//            final Path rootDir = FSUtils.getRootDir(conf);
-//            for (String curDeadServerName : deadRegionServers) {
-//              final Path deadRsDirectory = new Path(rootDir,
-//                AbstractFSWALProvider.getWALDirectoryName(curDeadServerName));
-//              Path[] locs = new Path[] { new Path(deadRsDirectory, currentPath.getName()),
-//                new Path(deadRsDirectory.suffix(AbstractFSWALProvider.SPLITTING_EXT),
-//                  currentPath.getName()) };
-//              for (Path possibleLogLocation : locs) {
-//                LOG.info("Possible location " + possibleLogLocation.toUri().toString());
-//                if (manager.getFs().exists(possibleLogLocation)) {
-//                  // We found the right new location
-//                  LOG.info("Log " + this.currentPath + " still exists at " +
-//                      possibleLogLocation);
-//                  // Breaking here will make us sleep since reader is null
-//                  // TODO why don't we need to set currentPath and call openReader here?
-//
-//                  return true;
-//                }
-//              }
-//            }
-//            // In the case of disaster/recovery, HMaster may be shutdown/crashed before flush data
-//            // from .logs to .oldlogs. Loop into .logs folders and check whether a match exists
-//            if (stopper instanceof ReplicationSyncUp.DummyServer) {
-//              // N.B. the ReplicationSyncUp tool sets the manager.getLogDir to the root of the wal
-//              //      area rather than to the wal area for a particular region server.
-//              FileStatus[] rss = fs.listStatus(manager.getLogDir());
-//              for (FileStatus rs : rss) {
-//                Path p = rs.getPath();
-//                FileStatus[] logs = fs.listStatus(p);
-//                for (FileStatus log : logs) {
-//                  p = new Path(p, log.getPath().getName());
-//                  if (p.getName().equals(currentPath.getName())) {
-//                    currentPath = p;
-//                    LOG.info("Log " + currentPath.getName() + " found at " + currentPath);
-//                    // Open the log at the new location
-//                    this.openReader(sleepMultiplier);
-//                    return true;
-//                  }
-//                }
-//              }
-//            }
-//
-//            // TODO What happens if the log was missing from every single location?
-//            // Although we need to check a couple of times as the log could have
-//            // been moved by the master between the checks
-//            // It can also happen if a recovered queue wasn't properly cleaned,
-//            // such that the znode pointing to a log exists but the log was
-//            // deleted a long time ago.
-//            // For the moment, we'll throw the IO and processEndOfFile
-//            throw new IOException("File from recovered queue is " +
-//                "nowhere to be found", fnfe);
-//          } else {
-//            // If the log was archived, continue reading from there
-//            Path archivedLogLocation =
-//                new Path(manager.getOldLogDir(), currentPath.getName());
-//            if (manager.getFs().exists(archivedLogLocation)) {
-//              currentPath = archivedLogLocation;
-//              LOG.info("Log " + this.currentPath + " was moved to " +
-//                  archivedLogLocation);
-//              // Open the log at the new location
-//              this.openReader(sleepMultiplier);
-//
-//            }
-//            // TODO What happens the log is missing in both places?
-//          }
-//        }
-//      } catch (LeaseNotRecoveredException lnre) {
-//        // HBASE-15019 the WAL was not closed due to some hiccup.
-//        LOG.warn(peerClusterZnode + " Try to recover the WAL lease " + currentPath, lnre);
-//        recoverLease(conf, currentPath);
-//        this.reader = null;
-//      } catch (IOException ioe) {
-//        if (ioe instanceof EOFException && isCurrentLogEmpty()) return true;
-//        LOG.warn(peerClusterZnode + " Got: ", ioe);
-//        this.reader = null;
-//        if (ioe.getCause() instanceof NullPointerException) {
-//          // Workaround for race condition in HDFS-4380
-//          // which throws a NPE if we open a file before any data node has the most recent block
-//          // Just sleep and retry. Will require re-reading compressed WALs for compressionContext.
-//          LOG.warn("Got NPE opening reader, will retry.");
-//        } else if (sleepMultiplier >= maxRetriesMultiplier) {
-//          // TODO Need a better way to determine if a file is really gone but
-//          // TODO without scanning all logs dir
-//          LOG.warn("Waited too long for this file, considering dumping");
-//          return !processEndOfFile();
-//        }
-//      }
-//      return true;
-//    }
+    protected boolean openReader(int sleepMultiplier) {
+      try {
+        try {
+          if (LOG.isTraceEnabled()) {
+            LOG.trace("Opening log " + this.currentPath);
+          }
+          this.reader = repLogReader.openReader(this.currentPath);
+        } catch (FileNotFoundException fnfe) {
+          if (this.replicationQueueInfo.isQueueRecovered()) {
+            // We didn't find the log in the archive directory, look if it still
+            // exists in the dead RS folder (there could be a chain of failures
+            // to look at)
+            List<String> deadRegionServers = this.replicationQueueInfo.getDeadRegionServers();
+            LOG.info("NB dead servers : " + deadRegionServers.size());
+            final Path rootDir = FSUtils.getRootDir(conf);
+            for (String curDeadServerName : deadRegionServers) {
+              final Path deadRsDirectory = new Path(rootDir,
+                AbstractFSWALProvider.getWALDirectoryName(curDeadServerName));
+              Path[] locs = new Path[] { new Path(deadRsDirectory, currentPath.getName()),
+                new Path(deadRsDirectory.suffix(AbstractFSWALProvider.SPLITTING_EXT),
+                  currentPath.getName()) };
+              for (Path possibleLogLocation : locs) {
+                LOG.info("Possible location " + possibleLogLocation.toUri().toString());
+                if (manager.getFs().exists(possibleLogLocation)) {
+                  // We found the right new location
+                  LOG.info("Log " + this.currentPath + " still exists at " +
+                      possibleLogLocation);
+                  // Breaking here will make us sleep since reader is null
+                  // TODO why don't we need to set currentPath and call openReader here?
+                  return true;
+                }
+              }
+            }
+            // In the case of disaster/recovery, HMaster may be shutdown/crashed before flush data
+            // from .logs to .oldlogs. Loop into .logs folders and check whether a match exists
+            if (stopper instanceof ReplicationSyncUp.DummyServer) {
+              // N.B. the ReplicationSyncUp tool sets the manager.getLogDir to the root of the wal
+              //      area rather than to the wal area for a particular region server.
+              FileStatus[] rss = fs.listStatus(manager.getLogDir());
+              for (FileStatus rs : rss) {
+                Path p = rs.getPath();
+                FileStatus[] logs = fs.listStatus(p);
+                for (FileStatus log : logs) {
+                  p = new Path(p, log.getPath().getName());
+                  if (p.getName().equals(currentPath.getName())) {
+                    currentPath = p;
+                    LOG.info("Log " + currentPath.getName() + " found at " + currentPath);
+                    // Open the log at the new location
+                    this.openReader(sleepMultiplier);
+                    return true;
+                  }
+                }
+              }
+            }
+
+            // TODO What happens if the log was missing from every single location?
+            // Although we need to check a couple of times as the log could have
+            // been moved by the master between the checks
+            // It can also happen if a recovered queue wasn't properly cleaned,
+            // such that the znode pointing to a log exists but the log was
+            // deleted a long time ago.
+            // For the moment, we'll throw the IO and processEndOfFile
+            throw new IOException("File from recovered queue is " +
+                "nowhere to be found", fnfe);
+          } else {
+            // If the log was archived, continue reading from there
+            Path archivedLogLocation =
+                new Path(manager.getOldLogDir(), currentPath.getName());
+            if (manager.getFs().exists(archivedLogLocation)) {
+              currentPath = archivedLogLocation;
+              LOG.info("Log " + this.currentPath + " was moved to " +
+                  archivedLogLocation);
+              // Open the log at the new location
+              this.openReader(sleepMultiplier);
+
+            }
+            // TODO What happens the log is missing in both places?
+          }
+        }
+      } catch (LeaseNotRecoveredException lnre) {
+        // HBASE-15019 the WAL was not closed due to some hiccup.
+        LOG.warn(peerClusterZnode + " Try to recover the WAL lease " + currentPath, lnre);
+        recoverLease(conf, currentPath);
+        this.reader = null;
+      } catch (IOException ioe) {
+        if (ioe instanceof EOFException && isCurrentLogEmpty()) return true;
+        LOG.warn(peerClusterZnode + " Got: ", ioe);
+        this.reader = null;
+        if (ioe.getCause() instanceof NullPointerException) {
+          // Workaround for race condition in HDFS-4380
+          // which throws a NPE if we open a file before any data node has the most recent block
+          // Just sleep and retry. Will require re-reading compressed WALs for compressionContext.
+          LOG.warn("Got NPE opening reader, will retry.");
+        } else if (sleepMultiplier >= maxRetriesMultiplier) {
+          // TODO Need a better way to determine if a file is really gone but
+          // TODO without scanning all logs dir
+          LOG.warn("Waited too long for this file, considering dumping");
+          return !processEndOfFile();
+        }
+      }
+      return true;
+    }
 
     private void recoverLease(final Configuration conf, final Path path) {
       try {
@@ -980,10 +979,10 @@ public class ReplicationSource extends Thread
      * trying to read the log file and get EOFException. In case of a recovered queue the last log
      * file may be empty, and we don't want to retry that.
      */
-//    private boolean isCurrentLogEmpty() {
-//      return (this.repLogReader.getPosition() == 0 &&
-//          !this.replicationQueueInfo.isQueueRecovered() && queue.size() == 0);
-//    }
+    private boolean isCurrentLogEmpty() {
+      return (this.repLogReader.getPosition() == 0 &&
+          !this.replicationQueueInfo.isQueueRecovered() && queue.size() == 0);
+    }
 
     /**
      * Count the number of different row keys in the given edit because of mini-batching. We assume
@@ -1072,17 +1071,17 @@ public class ReplicationSource extends Thread
             sleepMultiplier = Math.max(sleepMultiplier - 1, 0);
           }
 
-//          if (this.lastLoggedPosition != this.repLogReader.getPosition()) {
-//            //Clean up hfile references
-//            int size = entries.size();
-//            for (int i = 0; i < size; i++) {
-//              cleanUpHFileRefs(entries.get(i).getEdit());
-//            }
-//            //Log and clean up WAL logs
-//            manager.logPositionAndCleanOldLogs(this.currentPath, peerClusterZnode,
-//              this.repLogReader.getPosition(), this.replicationQueueInfo.isQueueRecovered());
-//            this.lastLoggedPosition = this.repLogReader.getPosition();
-//          }
+          if (this.lastLoggedPosition != this.repLogReader.getPosition()) {
+            //Clean up hfile references
+            int size = entries.size();
+            for (int i = 0; i < size; i++) {
+              cleanUpHFileRefs(entries.get(i).getEdit());
+            }
+            //Log and clean up WAL logs
+            manager.logPositionAndCleanOldLogs(this.currentPath, peerClusterZnode,
+              this.repLogReader.getPosition(), this.replicationQueueInfo.isQueueRecovered());
+            this.lastLoggedPosition = this.repLogReader.getPosition();
+          }
           if (throttler.isEnabled()) {
             throttler.addPushSize(currentSize);
           }
@@ -1114,32 +1113,32 @@ public class ReplicationSource extends Thread
      * @return true if we're done with the current file, false if we should continue trying to read
      *         from it
      */
-//    @edu.umd.cs.findbugs.annotations.SuppressWarnings(value = "DE_MIGHT_IGNORE",
-//        justification = "Yeah, this is how it works")
-//    protected boolean processEndOfFile() {
-//      if (this.queue.size() != 0) {
-//        if (LOG.isTraceEnabled()) {
-//          String filesize = "N/A";
-//          try {
-//            FileStatus stat = fs.getFileStatus(this.currentPath);
-//            filesize = stat.getLen() + "";
-//          } catch (IOException ex) {
-//          }
-//          LOG.trace("Reached the end of log " + this.currentPath + ", stats: " + getStats()
-//              + ", and the length of the file is " + filesize);
-//        }
-//        this.currentPath = null;
-//        this.repLogReader.finishCurrentFile();
-//        this.reader = null;
-//        return true;
-//      } else if (this.replicationQueueInfo.isQueueRecovered()) {
-//        LOG.debug("Finished recovering queue for group " + walGroupId + " of peer "
-//            + peerClusterZnode);
-//        workerRunning = false;
-//        return true;
-//      }
-//      return false;
-//    }
+    @edu.umd.cs.findbugs.annotations.SuppressWarnings(value = "DE_MIGHT_IGNORE",
+        justification = "Yeah, this is how it works")
+    protected boolean processEndOfFile() {
+      if (this.queue.size() != 0) {
+        if (LOG.isTraceEnabled()) {
+          String filesize = "N/A";
+          try {
+            FileStatus stat = fs.getFileStatus(this.currentPath);
+            filesize = stat.getLen() + "";
+          } catch (IOException ex) {
+          }
+          LOG.trace("Reached the end of log " + this.currentPath + ", stats: " + getStats()
+              + ", and the length of the file is " + filesize);
+        }
+        this.currentPath = null;
+        this.repLogReader.finishCurrentFile();
+        this.reader = null;
+        return true;
+      } else if (this.replicationQueueInfo.isQueueRecovered()) {
+        LOG.debug("Finished recovering queue for group " + walGroupId + " of peer "
+            + peerClusterZnode);
+        workerRunning = false;
+        return true;
+      }
+      return false;
+    }
 
     public void startup() {
       String n = Thread.currentThread().getName();
@@ -1159,9 +1158,9 @@ public class ReplicationSource extends Thread
       return this.currentPath;
     }
 
-//    public long getCurrentPosition() {
-//      return this.repLogReader.getPosition();
-//    }
+    public long getCurrentPosition() {
+      return this.repLogReader.getPosition();
+    }
 
     private boolean isWorkerActive() {
       return !stopper.isStopped() && workerRunning && !isInterrupted();
