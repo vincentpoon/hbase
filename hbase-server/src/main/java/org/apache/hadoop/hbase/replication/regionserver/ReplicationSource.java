@@ -1040,7 +1040,7 @@ public class ReplicationSource extends Thread
       int sleepMultiplier = 0;
       List<Entry> entries = entryBatch.getWalEntries();
       long lastReadPosition = entryBatch.getLastWalPosition();
-      if (entryBatch == null || entries.isEmpty()) {
+      if (entries.isEmpty()) {
         // we made progress in the WAL but all entries were filtered
         if (lastLoggedPosition != lastReadPosition) {
           manager.logPositionAndCleanOldLogs(entryBatch.getLastWalPath(),
