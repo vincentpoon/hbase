@@ -554,9 +554,9 @@ public class ReplicationSource extends Thread
       // /start a background thread to read and batch entries
       ArrayList<WALEntryFilter> filters = Lists.newArrayList(new ReplicationClusterMarkingEntryFilter(), walEntryFilter);
       ChainWALEntryFilter batcherFilter = new ChainWALEntryFilter(filters);
-      ReplicationWALEntryBatcher replicationWALEntryBatcher = new ReplicationWALEntryBatcher(replicationQueueInfo, queue, startPosition, fs, conf, batcherFilter);
+      batcher = new ReplicationWALEntryBatcher(replicationQueueInfo, queue, startPosition, fs, conf, batcherFilter);
       
-      replicationWALEntryBatcher.start();
+      batcher.start();
       
       // Loop until we close down
       while (isWorkerActive()) {
@@ -609,7 +609,7 @@ public class ReplicationSource extends Thread
 //          continue;
 //        }
 
-        boolean gotIOE = false;
+//        boolean gotIOE = false;
         currentNbOperations = 0;
         currentNbHFiles = 0;
         List<WAL.Entry> entries = Collections.emptyList();
@@ -1041,8 +1041,8 @@ public class ReplicationSource extends Thread
       List<Entry> entries = entryBatch.getWalEntries();
       long lastReadPosition = entryBatch.getLastWalPosition();
       if (entries.isEmpty()) {
-        // we made progress in the WAL but all entries were filtered
         if (lastLoggedPosition != lastReadPosition) {
+          // we made progress in the WAL but all entries were filtered
           manager.logPositionAndCleanOldLogs(entryBatch.getLastWalPath(),
             peerClusterZnode, lastReadPosition,
             this.replicationQueueInfo.isQueueRecovered());
@@ -1051,10 +1051,10 @@ public class ReplicationSource extends Thread
         
         // if there was nothing to ship and it's not an error
         // set "ageOfLastShippedOp" to <now> to indicate that we're current
-        metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
-        if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
-          sleepMultiplier++;
-        }
+//        metrics.setAgeOfLastShippedOp(EnvironmentEdgeManager.currentTime(), walGroupId);
+//        if (sleepForRetries("Nothing to replicate", sleepMultiplier)) {
+//          sleepMultiplier++;
+//        }
         return;
       }
       
@@ -1205,13 +1205,16 @@ public class ReplicationSource extends Thread
         LOG.error("Closing worker for wal group " + this.walGroupId
             + " because an error occurred: " + reason, cause);
       }
-      this.interrupt();
+      this.interrupt();      
       Threads.shutdown(this, sleepForRetries);
+      batcher.interrupt();
+      Threads.shutdown(batcher, sleepForRetries);
       LOG.info("ReplicationSourceWorker " + this.getName() + " terminated");
     }
 
     public void setWorkerRunning(boolean workerRunning) {
       this.workerRunning = workerRunning;
+      this.batcher.setWorkerRunning(workerRunning);
     }
     
     // Filters out entries with our clusterId, and marks all other entries with our clusterID
