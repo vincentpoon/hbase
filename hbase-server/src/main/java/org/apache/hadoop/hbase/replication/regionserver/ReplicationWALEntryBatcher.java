@@ -13,10 +13,14 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.protobuf.generated.WALProtos.BulkLoadDescriptor;
+import org.apache.hadoop.hbase.protobuf.generated.WALProtos.StoreDescriptor;
+import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
 import org.apache.hadoop.hbase.replication.regionserver.WALEntryStream.WALEntryStreamRuntimeException;
-import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 
@@ -44,23 +48,28 @@ public class ReplicationWALEntryBatcher extends Thread {
   private long sleepForRetries;
   //Indicates whether this particular worker is running
   private boolean workerRunning = true;
-
   private ReplicationQueueInfo replicationQueueInfo;
   
   public static class WALEntryBatch {
     private List<Entry> walEntries;
+    // last WAL that was read
     private Path lastWalPath;
+    // position in WAL of last entry in this batch
     private long lastWalPosition;
+    // Current size of data we need to replicate
+    private int size = 0;
     
     /**
      * @param walEntries
      * @param lastWalPath
      * @param lastWalPosition
+     * @param size
      */
-    public WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition) {
+    public WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition, int size) {
       this.walEntries = walEntries;
       this.lastWalPath = lastWalPath;
       this.lastWalPosition = lastWalPosition;
+      this.size = size;
     }
 
     /**
@@ -82,6 +91,13 @@ public class ReplicationWALEntryBatcher extends Thread {
      */
     public long getLastWalPosition() {
       return lastWalPosition;
+    }
+
+    /**
+     * @return the currentSize
+     */
+    public int getSize() {
+      return size;
     }
 
   }
@@ -114,20 +130,23 @@ public class ReplicationWALEntryBatcher extends Thread {
 
   @Override
   public void run() {
-    while (isWorkerRunning()) {
+    int sleepMultiplier = 1;
+    while (isWorkerRunning()) {      
       try {
         WALEntryBatch batch = readBatch();
         if (batch != null) {
           entryBatchQueue.put(batch);
+          sleepMultiplier = 1;
         } else {
           LOG.debug("Didn't read any new entries from WAL");
-          Thread.sleep(sleepForRetries);
+          if (sleepMultiplier < 60) sleepMultiplier++; //TODO remove
         }
+        Thread.sleep(sleepForRetries * sleepMultiplier);
       } catch (IOException | WALEntryStreamRuntimeException e) {
         LOG.warn("Failed to read replication entry batch", e);
-        Threads.sleep(sleepForRetries);
+        Threads.sleep(sleepForRetries * sleepMultiplier);
       } catch (InterruptedException e) {
-        LOG.debug("Interrupted while reading replication entry batch", e);
+        LOG.trace("Interrupted while reading replication entry batch");
       }      
     }
   }
@@ -140,15 +159,20 @@ public class ReplicationWALEntryBatcher extends Thread {
   public WALEntryBatch poll(long timeout, TimeUnit unit) throws InterruptedException {
     return entryBatchQueue.poll(timeout, unit);
   }
+  
+  public WALEntryBatch take() throws InterruptedException {
+    return entryBatchQueue.take();
+  }
 
-  private WALEntryBatch readBatch() throws IOException {       
+  private WALEntryBatch readBatch() throws IOException {   
     try (WALEntryStream entryStream = new WALEntryStream(replicationQueueInfo, logQueue, fs, conf, this.currentPosition, filter)) {
-      List<Entry> entries = new ArrayList<>(1);
+      List<Entry> entries = new ArrayList<>(replicationBatchNbCapacity);
       int currentSize = 0;
       while (entryStream.hasNext()) {
         Entry entry = entryStream.next();        
         currentSize += entry.getEdit().heapSize();
-        entries.add(entry);
+        currentSize += calculateTotalSizeOfStoreFiles(entry.getEdit());
+        entries.add(entry);        
         // Stop if too many entries or too big
         // FIXME check the relationship between single wal group and overall
         if (currentSize >= replicationBatchNbCapacity
@@ -156,16 +180,42 @@ public class ReplicationWALEntryBatcher extends Thread {
           break;
         }
       }
-      
       WALEntryBatch batch = null;
       currentPosition = entryStream.getPosition();
-      
       if (entries.size() > 0 || this.currentPosition != entryStream.getPosition()) {
-        batch = new WALEntryBatch(entries, entryStream.getCurrentPath(), currentPosition);
+        batch = new WALEntryBatch(entries, entryStream.getCurrentPath(), currentPosition, currentSize);
       }
-      
       return batch;      
     }
+  }
+  
+  /**
+   * Calculate the total size of all the store files
+   * @param edit edit to count row keys from
+   * @return the total size of the store files
+   */
+  private int calculateTotalSizeOfStoreFiles(WALEdit edit) {
+    List<Cell> cells = edit.getCells();
+    int totalStoreFilesSize = 0;
+
+    int totalCells = edit.size();
+    for (int i = 0; i < totalCells; i++) {
+      if (CellUtil.matchingQualifier(cells.get(i), WALEdit.BULK_LOAD)) {
+        try {
+          BulkLoadDescriptor bld = WALEdit.getBulkLoadDescriptor(cells.get(i));
+          List<StoreDescriptor> stores = bld.getStoresList();
+          int totalStores = stores.size();
+          for (int j = 0; j < totalStores; j++) {
+            totalStoreFilesSize += stores.get(j).getStoreFileSizeBytes();
+          }
+        } catch (IOException e) {
+          LOG.error("Failed to deserialize bulk load entry from wal edit. "
+              + "Size of HFiles part of cell will not be considered in replication "
+              + "request size calculation.", e);
+        }
+      }
+    }
+    return totalStoreFilesSize;
   }
 
   /**

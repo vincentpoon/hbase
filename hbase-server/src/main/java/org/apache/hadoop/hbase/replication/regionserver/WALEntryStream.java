@@ -1,22 +1,25 @@
 package org.apache.hadoop.hbase.replication.regionserver;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 import org.apache.hadoop.hbase.wal.WAL.Reader;
-import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.WALFactory;
 
 /**
@@ -30,9 +33,12 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   
   private Reader reader;
   private Path currentPath;
-  private Entry currentEntry;
-  // position in the Reader to start reading at
-  private long currentPosition = 0;
+  // cache of next entry for hasNext()
+  private Entry nextEntry;
+  // position we last read at
+  private long nextPosition = 0;
+  // this is the position of the last entry returned to the called of next()
+  private long lastPosition = 0;
   private PriorityBlockingQueue<Path> logQueue;
   private FileSystem fs;
   private Configuration conf;
@@ -83,8 +89,9 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     this.fs = fs;
     this.conf = conf;
     this.filter = filter;
-    this.currentPosition = startPosition;
+    this.nextPosition = startPosition;
 
+    // we read ahead here so hasNext is correct
     tryAdvanceEntry();
   }
 
@@ -94,7 +101,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
    */
   @Override
   public boolean hasNext() {
-    return currentEntry != null;
+    return nextEntry != null;
   }
 
   /**
@@ -105,9 +112,11 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
    */
   @Override
   public Entry next() {
-    if (currentEntry == null) throw new NoSuchElementException();
-    Entry save = currentEntry;
+    if (nextEntry == null) throw new NoSuchElementException();
+    Entry save = nextEntry;
+    lastPosition = nextPosition;
     try {
+      // we read ahead here so hasNext is correct
       tryAdvanceEntry();
     } catch (IOException e) {
       throw new WALEntryStreamRuntimeException(e);
@@ -141,11 +150,11 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   }
 
   /**
-   * Returns the position we stopped reading at
-   * @return the position we stopped reading at.
+   * Returns the position of the last Entry returned by next()
+   * @return the position of the last Entry returned by next()
    */
   public long getPosition() {
-    return currentPosition;
+    return lastPosition;
   }
 
   /**
@@ -163,7 +172,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   private void tryAdvanceEntry() throws IOException {
     if (checkReader()) {
       readNextEntryAndSetPosition();
-      if (currentEntry == null) { // no more entries in this log file - see if log was rolled
+      if (nextEntry == null) { // no more entries in this log file - see if log was rolled
         if (logQueue.size() > 1) { // log was rolled
           // Before dequeueing, we should always get one more attempt at reading.
           // This is in case more entries came in after we opened the reader, 
@@ -171,7 +180,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
           resetReader();
           seek();
           readNextEntryAndSetPosition();
-          if (currentEntry == null) { // now certain we're done with current log
+          if (nextEntry == null) { // now certain we're done with current log
             dequeueCurrentLog();
             if (openNextLog()) {
               readNextEntryAndSetPosition();
@@ -185,9 +194,11 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   }
   
   private void dequeueCurrentLog() throws IOException {
+    LOG.trace("Dequeuing current log: " + getCurrentPath());    
     closeReader();
     logQueue.remove();
-    currentPosition = 0;
+    lastPosition = 0;
+    nextPosition = 0;
   }
 
   
@@ -196,19 +207,19 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
    * @throws IOException
    */
   private void seek() throws IOException {
-    if (currentPosition != 0) {
-      reader.seek(currentPosition);
+    if (nextPosition != 0) {
+      reader.seek(nextPosition);
     }
   }
-  
+
   private void readNextEntryAndSetPosition() throws IOException {
-    Entry nextEntry = reader.next();    
+    Entry readEntry = reader.next();    
     if (filter != null) {
       // keep filtering until we get an entry, or we run out of entries to read
       while (filter.filter(nextEntry) == null && (nextEntry = reader.next()) != null);
-    }        
-    currentEntry = nextEntry;
-    currentPosition = reader.getPosition();    
+    }
+    nextEntry = readEntry;
+    nextPosition = reader.getPosition();    
   }
 
   private void closeReader() throws IOException {
@@ -231,7 +242,6 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     if (nextPath != null) {
       if (!fs.exists(nextPath)) {
         if (!replicationQueueInfo.isQueueRecovered()) {
-          
 //          if(isLogInDeadRs(nextPath)) return false; //TODO log
        // If the log was archived, continue reading from there
           Path rootDir = FSUtils.getRootDir(conf);
