@@ -49,82 +49,6 @@ public class ReplicationWALEntryBatcher extends Thread {
   private boolean workerRunning = true;
   private ReplicationQueueInfo replicationQueueInfo;
   private int maxRetriesMultiplier;
-  
-  public static class WALEntryBatch {
-    private List<Entry> walEntries;
-    // last WAL that was read
-    private Path lastWalPath;
-    // position in WAL of last entry in this batch
-    private long lastWalPosition;
-    // Current size of data we need to replicate
-    private int size = 0;
-    // number of distinct row keys in this batch
-    private int nbRowKeys = 0;
-    // number of HFiles
-    private int nbHFiles = 0;    
-    
-    /**
-     * @param walEntries
-     * @param lastWalPath
-     * @param lastWalPosition
-     * @param size
-     */
-    private WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition, int size, int nbRowKeys, int nbHFiles) {
-      this.walEntries = walEntries;
-      this.lastWalPath = lastWalPath;
-      this.lastWalPosition = lastWalPosition;
-      this.size = size;
-    }
-
-    /**
-     * @return the WAL Entries.
-     */
-    public List<Entry> getWalEntries() {
-      return walEntries;
-    }
-
-    /**
-     * @return the path of the last WAL that was read.
-     */
-    public Path getLastWalPath() {
-      return lastWalPath;
-    }
-
-    /**
-     * @return the position in the last WAL that was read.
-     */
-    public long getLastWalPosition() {
-      return lastWalPosition;
-    }
-
-    /**
-     * @return the currentSize
-     */
-    public int getSize() {
-      return size;
-    }
-    
-    /**
-     * @return total number of operations in this batch
-     */
-    public int getNbOperations() {
-      return getNbRowKeys() + getNbHFiles();
-    }
-
-    /**
-     * @return the number of distinct row keys in this batch
-     */
-    public int getNbRowKeys() {
-      return nbRowKeys;
-    }
-
-    /**
-     * @return the number of HFiles in this batch
-     */
-    public int getNbHFiles() {
-      return nbHFiles;
-    }
-  }
 
   /**
    * Creates a batcher for a given WAL queue.
@@ -157,7 +81,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   @Override
   public void run() {
     int sleepMultiplier = 1;
-    while (isWorkerRunning()) {      
+    while (isWorkerRunning()) {
       try {
         WALEntryBatch batch = readBatch();
         if (batch != null) {
@@ -301,5 +225,82 @@ public class ReplicationWALEntryBatcher extends Thread {
    */
   public void setWorkerRunning(boolean workerRunning) {
     this.workerRunning = workerRunning;
+  }
+
+  public static class WALEntryBatch {
+    private List<Entry> walEntries;
+    // last WAL that was read
+    private Path lastWalPath;
+    // position in WAL of last entry in this batch
+    private long lastWalPosition;
+    // Current size of data we need to replicate
+    private int size = 0;
+    // number of distinct row keys in this batch
+    private int nbRowKeys = 0;
+    // number of HFiles
+    private int nbHFiles = 0;
+
+    /**
+     * @param walEntries
+     * @param lastWalPath
+     * @param lastWalPosition
+     * @param size
+     */
+    private WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition, int size,
+        int nbRowKeys, int nbHFiles) {
+      this.walEntries = walEntries;
+      this.lastWalPath = lastWalPath;
+      this.lastWalPosition = lastWalPosition;
+      this.size = size;
+    }
+
+    /**
+     * @return the WAL Entries.
+     */
+    public List<Entry> getWalEntries() {
+      return walEntries;
+    }
+
+    /**
+     * @return the path of the last WAL that was read.
+     */
+    public Path getLastWalPath() {
+      return lastWalPath;
+    }
+
+    /**
+     * @return the position in the last WAL that was read.
+     */
+    public long getLastWalPosition() {
+      return lastWalPosition;
+    }
+
+    /**
+     * @return the currentSize
+     */
+    public int getSize() {
+      return size;
+    }
+
+    /**
+     * @return total number of operations in this batch
+     */
+    public int getNbOperations() {
+      return getNbRowKeys() + getNbHFiles();
+    }
+
+    /**
+     * @return the number of distinct row keys in this batch
+     */
+    public int getNbRowKeys() {
+      return nbRowKeys;
+    }
+
+    /**
+     * @return the number of HFiles in this batch
+     */
+    public int getNbHFiles() {
+      return nbHFiles;
+    }
   }
 }
