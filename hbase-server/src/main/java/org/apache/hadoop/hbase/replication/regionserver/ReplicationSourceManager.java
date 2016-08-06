@@ -188,7 +188,7 @@ public class ReplicationSourceManager implements ReplicationListener {
     LOG.debug("Cleaning old logs at: " + log + " " + position);
     String fileName = log.getName();
     this.replicationQueues.setLogPosition(id, fileName, position);
-//    cleanOldLogs(fileName, id, queueRecovered);
+    cleanOldLogs(fileName, id, queueRecovered);
   }
 
   /**

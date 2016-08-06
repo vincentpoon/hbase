@@ -21,11 +21,10 @@ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
 import org.apache.hadoop.hbase.replication.regionserver.WALEntryStream.WALEntryStreamRuntimeException;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 
-// we can probably change this once we have streaming output in addition to input
-// but for now, our replicate() takes a batch, so that's what we create here
 /**
  * Reads and filters WAL entries in batches, and puts the batches on a queue
  *
@@ -49,6 +48,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   //Indicates whether this particular worker is running
   private boolean workerRunning = true;
   private ReplicationQueueInfo replicationQueueInfo;
+  private int maxRetriesMultiplier;
   
   public static class WALEntryBatch {
     private List<Entry> walEntries;
@@ -58,6 +58,10 @@ public class ReplicationWALEntryBatcher extends Thread {
     private long lastWalPosition;
     // Current size of data we need to replicate
     private int size = 0;
+    // number of distinct row keys in this batch
+    private int nbRowKeys = 0;
+    // number of HFiles
+    private int nbHFiles = 0;    
     
     /**
      * @param walEntries
@@ -65,7 +69,7 @@ public class ReplicationWALEntryBatcher extends Thread {
      * @param lastWalPosition
      * @param size
      */
-    public WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition, int size) {
+    private WALEntryBatch(List<Entry> walEntries, Path lastWalPath, long lastWalPosition, int size, int nbRowKeys, int nbHFiles) {
       this.walEntries = walEntries;
       this.lastWalPath = lastWalPath;
       this.lastWalPosition = lastWalPosition;
@@ -73,21 +77,21 @@ public class ReplicationWALEntryBatcher extends Thread {
     }
 
     /**
-     * @return Returns the walEntries.
+     * @return the WAL Entries.
      */
     public List<Entry> getWalEntries() {
       return walEntries;
     }
 
     /**
-     * @return Returns the path of the last WAL that was read.
+     * @return the path of the last WAL that was read.
      */
     public Path getLastWalPath() {
       return lastWalPath;
     }
 
     /**
-     * @return Returns the position in the last WAL that was read.
+     * @return the position in the last WAL that was read.
      */
     public long getLastWalPosition() {
       return lastWalPosition;
@@ -99,7 +103,27 @@ public class ReplicationWALEntryBatcher extends Thread {
     public int getSize() {
       return size;
     }
+    
+    /**
+     * @return total number of operations in this batch
+     */
+    public int getNbOperations() {
+      return getNbRowKeys() + getNbHFiles();
+    }
 
+    /**
+     * @return the number of distinct row keys in this batch
+     */
+    public int getNbRowKeys() {
+      return nbRowKeys;
+    }
+
+    /**
+     * @return the number of HFiles in this batch
+     */
+    public int getNbHFiles() {
+      return nbHFiles;
+    }
   }
 
   /**
@@ -126,6 +150,8 @@ public class ReplicationWALEntryBatcher extends Thread {
     this.replicationBatchNbCapacity = this.conf.getInt("replication.source.nb.capacity", 25000);
     this.sleepForRetries =
         this.conf.getLong("replication.source.sleepforretries", 1000);    // 1 second
+    this.maxRetriesMultiplier =
+        this.conf.getInt("replication.source.maxretriesmultiplier", 300); // 5 minutes @ 1 sec per
   }
 
   @Override
@@ -138,8 +164,8 @@ public class ReplicationWALEntryBatcher extends Thread {
           entryBatchQueue.put(batch);
           sleepMultiplier = 1;
         } else {
-          LOG.debug("Didn't read any new entries from WAL");
-          if (sleepMultiplier < 60) sleepMultiplier++; //TODO remove
+          LOG.trace("Didn't read any new entries from WAL");
+          if (sleepMultiplier < maxRetriesMultiplier) sleepMultiplier++; //TODO remove
         }
         Thread.sleep(sleepForRetries * sleepMultiplier);
       } catch (IOException | WALEntryStreamRuntimeException e) {
@@ -168,10 +194,15 @@ public class ReplicationWALEntryBatcher extends Thread {
     try (WALEntryStream entryStream = new WALEntryStream(replicationQueueInfo, logQueue, fs, conf, this.currentPosition, filter)) {
       List<Entry> entries = new ArrayList<>(replicationBatchNbCapacity);
       int currentSize = 0;
+      int currentNbRowKeys = 0;
+      int currentNbHFiles = 0;
       while (entryStream.hasNext()) {
         Entry entry = entryStream.next();        
         currentSize += entry.getEdit().heapSize();
         currentSize += calculateTotalSizeOfStoreFiles(entry.getEdit());
+        Pair<Integer, Integer> nbRowsAndHFiles = countDistinctRowKeysAndHFiles(entry.getEdit());
+        currentNbRowKeys += nbRowsAndHFiles.getFirst();
+        currentNbHFiles += nbRowsAndHFiles.getSecond();
         entries.add(entry);        
         // Stop if too many entries or too big
         // FIXME check the relationship between single wal group and overall
@@ -183,7 +214,8 @@ public class ReplicationWALEntryBatcher extends Thread {
       WALEntryBatch batch = null;
       currentPosition = entryStream.getPosition();
       if (entries.size() > 0 || this.currentPosition != entryStream.getPosition()) {
-        batch = new WALEntryBatch(entries, entryStream.getCurrentPath(), currentPosition, currentSize);
+        LOG.debug(String.format("Read %s WAL entries eligible for replication", entries.size()));
+        batch = new WALEntryBatch(entries, entryStream.getCurrentPath(), currentPosition, currentSize, currentNbRowKeys, currentNbHFiles);
       }
       return batch;      
     }
@@ -216,6 +248,45 @@ public class ReplicationWALEntryBatcher extends Thread {
       }
     }
     return totalStoreFilesSize;
+  }
+  
+  /**
+   * Count the number of different row keys in the given edit because of mini-batching. We assume
+   * that there's at least one Cell in the WALEdit.
+   * @param edit edit to count row keys from
+   * @return number of different row keys and HFiles
+   */
+  private Pair<Integer, Integer> countDistinctRowKeysAndHFiles(WALEdit edit) {    
+    List<Cell> cells = edit.getCells();
+    int distinctRowKeys = 1;
+    int totalHFileEntries = 0;
+    Cell lastCell = cells.get(0);
+
+    int totalCells = edit.size();
+    for (int i = 0; i < totalCells; i++) {
+      // Count HFiles to be replicated
+      if (CellUtil.matchingQualifier(cells.get(i), WALEdit.BULK_LOAD)) {
+        try {
+          BulkLoadDescriptor bld = WALEdit.getBulkLoadDescriptor(cells.get(i));
+          List<StoreDescriptor> stores = bld.getStoresList();
+          int totalStores = stores.size();
+          for (int j = 0; j < totalStores; j++) {
+            totalHFileEntries += stores.get(j).getStoreFileList().size();
+          }
+        } catch (IOException e) {
+          LOG.error("Failed to deserialize bulk load entry from wal edit. "
+              + "Then its hfiles count will not be added into metric.");
+        }
+      }
+
+      if (!CellUtil.matchingRows(cells.get(i), lastCell)) {
+        distinctRowKeys++;
+      }
+      lastCell = cells.get(i);
+    }
+    
+    Pair<Integer, Integer> result = new Pair<>(distinctRowKeys, totalHFileEntries);
+    return result;
   }
 
   /**

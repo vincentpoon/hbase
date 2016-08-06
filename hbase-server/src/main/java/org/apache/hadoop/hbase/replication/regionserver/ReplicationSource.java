@@ -508,14 +508,14 @@ public class ReplicationSource extends Thread
     // Handle on the log reader helper
 //    private ReplicationWALReaderManager repLogReader;
     // Current number of operations (Put/Delete) that we need to replicate
-    private int currentNbOperations = 0;
+//    private int currentNbOperations = 0;
     // Current size of data we need to replicate
 //    private int currentSize = 0;
     // Indicates whether this particular worker is running
     private boolean workerRunning = true;
     // Current number of hfiles that we need to replicate
-    private long currentNbHFiles = 0;    
-    ReplicationWALEntryBatcher batcher;
+//    private long currentNbHFiles = 0;    
+    ReplicationWALEntryBatcher entryBatcher;
 
     public ReplicationSourceWorkerThread(String walGroupId,
         PriorityBlockingQueue<Path> queue, ReplicationQueueInfo replicationQueueInfo,
@@ -529,13 +529,12 @@ public class ReplicationSource extends Thread
     
     @Override
     public void interrupt() {
-      batcher.interrupt();
+      entryBatcher.interrupt();
       super.interrupt();
     }
 
     @Override
-    public void run() {      
-            
+    public void run() {
       
       // Loop until we close down
       while (isWorkerActive()) {
@@ -547,7 +546,7 @@ public class ReplicationSource extends Thread
           }
           continue;
         }
-        if (batcher == null) {
+        if (entryBatcher == null) {
           if (sleepForRetries("Waiting for startup", sleepMultiplier)) {
             sleepMultiplier++;
           }
@@ -595,17 +594,12 @@ public class ReplicationSource extends Thread
 //        }
 
 //        boolean gotIOE = false;
-        currentNbOperations = 0;
-        currentNbHFiles = 0;
+//        currentNbOperations = 0;
+//        currentNbHFiles = 0;
 //        List<WAL.Entry> entries = Collections.emptyList();
 //        currentSize = 0;
         try {
-          WALEntryBatch entryBatch = batcher.take();
-          
-          if (entryBatch == null) {
-            LOG.debug("No WAL entries to replicate");
-            continue;
-          }
+          WALEntryBatch entryBatch = entryBatcher.take();
           shipEdits(entryBatch);
           
 
@@ -987,37 +981,37 @@ public class ReplicationSource extends Thread
      * @param edit edit to count row keys from
      * @return number of different row keys
      */
-    private int countDistinctRowKeys(WALEdit edit) {
-      List<Cell> cells = edit.getCells();
-      int distinctRowKeys = 1;
-      int totalHFileEntries = 0;
-      Cell lastCell = cells.get(0);
-
-      int totalCells = edit.size();
-      for (int i = 0; i < totalCells; i++) {
-        // Count HFiles to be replicated
-        if (CellUtil.matchingQualifier(cells.get(i), WALEdit.BULK_LOAD)) {
-          try {
-            BulkLoadDescriptor bld = WALEdit.getBulkLoadDescriptor(cells.get(i));
-            List<StoreDescriptor> stores = bld.getStoresList();
-            int totalStores = stores.size();
-            for (int j = 0; j < totalStores; j++) {
-              totalHFileEntries += stores.get(j).getStoreFileList().size();
-            }
-          } catch (IOException e) {
-            LOG.error("Failed to deserialize bulk load entry from wal edit. "
-                + "Then its hfiles count will not be added into metric.");
-          }
-        }
-
-        if (!CellUtil.matchingRows(cells.get(i), lastCell)) {
-          distinctRowKeys++;
-        }
-        lastCell = cells.get(i);
-      }
-      currentNbHFiles += totalHFileEntries;
-      return distinctRowKeys + totalHFileEntries;
-    }
+//    private int countDistinctRowKeys(WALEdit edit) {
+//      List<Cell> cells = edit.getCells();
+//      int distinctRowKeys = 1;
+//      int totalHFileEntries = 0;
+//      Cell lastCell = cells.get(0);
+//
+//      int totalCells = edit.size();
+//      for (int i = 0; i < totalCells; i++) {
+//        // Count HFiles to be replicated
+//        if (CellUtil.matchingQualifier(cells.get(i), WALEdit.BULK_LOAD)) {
+//          try {
+//            BulkLoadDescriptor bld = WALEdit.getBulkLoadDescriptor(cells.get(i));
+//            List<StoreDescriptor> stores = bld.getStoresList();
+//            int totalStores = stores.size();
+//            for (int j = 0; j < totalStores; j++) {
+//              totalHFileEntries += stores.get(j).getStoreFileList().size();
+//            }
+//          } catch (IOException e) {
+//            LOG.error("Failed to deserialize bulk load entry from wal edit. "
+//                + "Then its hfiles count will not be added into metric.");
+//          }
+//        }
+//
+//        if (!CellUtil.matchingRows(cells.get(i), lastCell)) {
+//          distinctRowKeys++;
+//        }
+//        lastCell = cells.get(i);
+//      }
+//      currentNbHFiles += totalHFileEntries;
+//      return distinctRowKeys + totalHFileEntries;
+//    }
 
     /**
      * Do the shipping logic
@@ -1104,16 +1098,16 @@ public class ReplicationSource extends Thread
             throttler.addPushSize(currentSize);
           }
           totalReplicatedEdits.addAndGet(entries.size());
-          totalReplicatedOperations.addAndGet(currentNbOperations);
+          totalReplicatedOperations.addAndGet(entryBatch.getNbOperations());
           // FIXME check relationship between wal group and overall
-          metrics.shipBatch(currentNbOperations, currentSize, currentNbHFiles);
+          metrics.shipBatch(entryBatch.getNbOperations(), currentSize, entryBatch.getNbHFiles());
           metrics.setAgeOfLastShippedOp(entries.get(entries.size() - 1).getKey().getWriteTime(),
             walGroupId);
-//          if (LOG.isTraceEnabled()) {
+          if (LOG.isTraceEnabled()) {
             LOG.debug("Replicated " + totalReplicatedEdits + " entries in total, or "
                 + totalReplicatedOperations + " operations in "
                 + ((endTimeNs - startTimeNs) / 1000000) + " ms");
-//          }
+          }
           break;
         } catch (Exception ex) {
           LOG.warn(replicationEndpoint.getClass().getName() + " threw unknown exception:"
@@ -1189,10 +1183,9 @@ public class ReplicationSource extends Thread
       
       // start a background thread to read and batch entries
       ArrayList<WALEntryFilter> filters = Lists.newArrayList(new ReplicationClusterMarkingEntryFilter(), walEntryFilter);
-//      ArrayList<WALEntryFilter> filters = Lists.newArrayList(walEntryFilter);
       ChainWALEntryFilter batcherFilter = new ChainWALEntryFilter(filters);
-      batcher = new ReplicationWALEntryBatcher(replicationQueueInfo, queue, startPosition, fs, conf, batcherFilter);
-      Threads.setDaemonThreadRunning(batcher, n + ".replicationSource.replicationWALEntryBatcher." + walGroupId + ","
+      entryBatcher = new ReplicationWALEntryBatcher(replicationQueueInfo, queue, startPosition, fs, conf, batcherFilter);
+      Threads.setDaemonThreadRunning(entryBatcher, n + ".replicationSource.replicationWALEntryBatcher." + walGroupId + ","
           + peerClusterZnode, handler);
     }
 
@@ -1218,14 +1211,14 @@ public class ReplicationSource extends Thread
       }
       this.interrupt();      
       Threads.shutdown(this, sleepForRetries);
-      batcher.interrupt();
-      Threads.shutdown(batcher, sleepForRetries);
+      entryBatcher.interrupt();
+      Threads.shutdown(entryBatcher, sleepForRetries);
       LOG.info("ReplicationSourceWorker " + this.getName() + " terminated");
     }
 
     public void setWorkerRunning(boolean workerRunning) {
       this.workerRunning = workerRunning;
-      this.batcher.setWorkerRunning(workerRunning);
+      this.entryBatcher.setWorkerRunning(workerRunning);
     }
     
     // Filters out entries with our clusterId, and marks all other entries with our clusterID
@@ -1241,9 +1234,9 @@ public class ReplicationSource extends Thread
           if (edit != null && edit.size() != 0) {
             // Mark that the current cluster has the change
             logKey.addClusterId(clusterId);
-            currentNbOperations += countDistinctRowKeys(edit);
+//            currentNbOperations += countDistinctRowKeys(edit);
          // We need to set the CC to null else it will be compressed when sent to the sink
-            entry.setCompressionContext(null); //TODO this probably belongs in its own filter
+            entry.setCompressionContext(null);
             return entry;
           } else {
             metrics.incrLogEditsFiltered();

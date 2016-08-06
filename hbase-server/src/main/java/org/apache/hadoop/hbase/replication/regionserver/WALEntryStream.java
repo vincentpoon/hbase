@@ -4,19 +4,16 @@ import java.io.IOException;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.PriorityBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
-import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
 import org.apache.hadoop.hbase.wal.WAL.Reader;
@@ -24,8 +21,8 @@ import org.apache.hadoop.hbase.wal.WALFactory;
 
 /**
  * Streaming access to WAL entries. This class is given a queue of WAL {@link Path}, and
- * continually iterates through all the WAL {@link Entry} in the queue, handling the rolling over of
- * one log to another.
+ * continually iterates through all the WAL {@link Entry} in the queue.  When it's done reading
+ * from a Path, it dequeues it and starts reading from the next.
  */
 @InterfaceAudience.Private
 public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<Entry> {
@@ -216,7 +213,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     Entry readEntry = reader.next();    
     if (filter != null) {
       // keep filtering until we get an entry, or we run out of entries to read
-      while (filter.filter(nextEntry) == null && (nextEntry = reader.next()) != null);
+      while (filter.filter(readEntry) == null && (readEntry = reader.next()) != null);
     }
     nextEntry = readEntry;
     nextPosition = reader.getPosition();    
