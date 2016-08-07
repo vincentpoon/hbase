@@ -1182,7 +1182,8 @@ public class ReplicationSource extends Thread
       }
       
       // start a background thread to read and batch entries
-      ArrayList<WALEntryFilter> filters = Lists.newArrayList(new ReplicationClusterMarkingEntryFilter(), walEntryFilter);
+      ArrayList<WALEntryFilter> filters =
+          Lists.newArrayList(walEntryFilter, new ReplicationClusterMarkingEntryFilter());
       ChainWALEntryFilter batcherFilter = new ChainWALEntryFilter(filters);
       entryBatcher = new ReplicationWALEntryBatcher(replicationQueueInfo, queue, startPosition, fs, conf, batcherFilter);
       Threads.setDaemonThreadRunning(entryBatcher, n + ".replicationSource.replicationWALEntryBatcher." + walGroupId + ","
@@ -1221,7 +1222,8 @@ public class ReplicationSource extends Thread
       this.entryBatcher.setWorkerRunning(workerRunning);
     }
     
-    // Filters out entries with our clusterId, and marks all other entries with our clusterID
+    // Filters out entries with our peerClusterId (i.e. already replicated)
+    // and marks all other entries with our clusterID
     private class ReplicationClusterMarkingEntryFilter implements WALEntryFilter {
       @Override
       public Entry filter(Entry entry) {
@@ -1240,6 +1242,7 @@ public class ReplicationSource extends Thread
             return entry;
           } else {
             metrics.incrLogEditsFiltered();
+            return null;
           }
         }
         return null;

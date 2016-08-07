@@ -84,7 +84,7 @@ public class ReplicationWALEntryBatcher extends Thread {
     while (isBatcherRunning()) { // we only loop back here if something fatal happened to our stream
       try (WALEntryStream entryStream = new WALEntryStream(replicationQueueInfo, logQueue, fs, conf,
           this.currentPosition, filter)) {
-        while (isBatcherRunning()) { // keep reusing stream while we can
+        while (isBatcherRunning()) { // loop here to keep reusing stream while we can
           List<Entry> entries = new ArrayList<>(replicationBatchNbCapacity);
           int currentHeapUsage, currentNbRowKeys, currentNbHFiles;
           currentHeapUsage = currentNbRowKeys = currentNbHFiles = 0;
