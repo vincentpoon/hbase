@@ -225,17 +225,33 @@ public class TestWALEntryStream {
    */
   @Test
   public void testNewEntriesWhileStreaming() throws Exception {
+    appendToLog("1");
+    try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(), walQueue, fs, conf, 0)) {
+      entryStream.next(); // we've hit the end of the stream at this point
+
+      // some new entries come in while we're streaming
+      appendToLog("2");
+      appendToLog("3");
+
+      // don't see them
+      assertFalse(entryStream.hasNext());
+
+      // But we do if we reset
+      entryStream.reset();
+      assertEquals("2", getRow(entryStream.next()));
+      assertEquals("3", getRow(entryStream.next()));
+      assertFalse(entryStream.hasNext());
+    }
+  }
+
+  @Test
+  public void testResumeStreamingFromPosition() throws Exception {
     long lastPosition = 0;
     appendToLog("1");
     try (WALEntryStream entryStream = new WALEntryStream(getQueueInfo(), walQueue, fs, conf, 0)) {
       entryStream.next(); // we've hit the end of the stream at this point
-      
-      // our reader doesn't see this because we opened the reader before these appends
       appendToLog("2");
       appendToLog("3");
-      //
-      // assertTrue(entryStream.hasNext()); // we think we've hit the end of the stream...
-      // assertTrue(entryStream.hasNext());
       lastPosition = entryStream.getPosition();
     }
     // next stream should picks up where we left off
@@ -312,7 +328,7 @@ public class TestWALEntryStream {
     appendToLog();
     batcher.setWorkerRunning(true);
     Thread.sleep(1000);
-    entryBatch = batcher.poll(10000, TimeUnit.MILLISECONDS);
+    entryBatch = batcher.poll(5000, TimeUnit.MILLISECONDS);
     assertEquals(3, entryBatch.getWalEntries().size());
     batcher.setWorkerRunning(false);
   }

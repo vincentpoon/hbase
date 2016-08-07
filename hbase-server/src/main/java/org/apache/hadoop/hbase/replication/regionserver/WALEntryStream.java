@@ -92,6 +92,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
   /**
    * Returns true if there is another WAL {@link Entry} in the logs
    * @return true if there is another WAL {@link Entry}
+   * @throws WALEntryStreamRuntimeException if there was an IOException
    */
   @Override
   public boolean hasNext() {
@@ -160,6 +161,15 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     return currentPath;
   }
 
+  /**
+   * Should be called if the stream is to be reused (i.e. called again after hasNext() has returned
+   * false)
+   * @throws IOException
+   */
+  public void reset() throws IOException {
+    resetReader();
+  }
+
   private void setCurrentPath(Path path) {
     this.currentPath = path;
   }
@@ -173,7 +183,6 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
           // This is in case more entries came in after we opened the reader, 
           // and a new log was enqueued while we were reading.  See HBASE-6758
           resetReader();
-          seek();
           readNextEntryAndSetPosition();
           if (currentEntry == null) { // now certain we're done with current log
             dequeueCurrentLog();
@@ -182,7 +191,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
             }
           }
         }
-        // if no other logs, we've simply hit end of current log. do nothing.
+        // if no other logs, we've simply hit the end of the current log. Do nothing
       }
     }
     // do nothing if we don't have a WAL Reader (e.g. if there's no logs in queue)
@@ -194,17 +203,6 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     logQueue.remove();
     // lastPosition = 0;
     currentPosition = 0;
-  }
-
-  
-  /**
-   * Advance the reader to the current position
-   * @throws IOException
-   */
-  private void seek() throws IOException {
-    if (currentPosition != 0) {
-      reader.seek(currentPosition);
-    }
   }
 
   private void readNextEntryAndSetPosition() throws IOException {
@@ -247,6 +245,7 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     return true;
   }
 
+  // open a reader on the next log in queue
   private boolean openNextLog() throws IOException {
     Path nextPath = logQueue.peek();
     if (nextPath != null) {
@@ -317,18 +316,25 @@ public class WALEntryStream implements Iterator<Entry>, AutoCloseable, Iterable<
     if (reader == null || !getCurrentPath().equals(path)) {
       closeReader();
       reader = WALFactory.createReader(fs, path, conf);
+      seek();
       setCurrentPath(path);
     } else {
       resetReader();
     }
-    seek();
   }
 
   private void resetReader() throws IOException {
     try {
       reader.reset();
+      seek();
     } catch (NullPointerException npe) {
       throw new IOException("NPE resetting reader, likely HDFS-4380", npe);
+    }
+  }
+
+  private void seek() throws IOException {
+    if (currentPosition != 0) {
+      reader.seek(currentPosition);
     }
   }
 

@@ -46,7 +46,7 @@ public class ReplicationWALEntryBatcher extends Thread {
   private WALEntryFilter filter;
   private long sleepForRetries;
   //Indicates whether this particular worker is running
-  private boolean workerRunning = true;
+  private boolean batcherRunning = true;
   private ReplicationQueueInfo replicationQueueInfo;
   private int maxRetriesMultiplier;
 
@@ -81,23 +81,55 @@ public class ReplicationWALEntryBatcher extends Thread {
   @Override
   public void run() {
     int sleepMultiplier = 1;
-    while (isWorkerRunning()) {
-      try {
-        WALEntryBatch batch = readBatch();
-        if (batch != null) {
-          entryBatchQueue.put(batch);
-          sleepMultiplier = 1;
-        } else {
-          LOG.trace("Didn't read any new entries from WAL");
-          if (sleepMultiplier < maxRetriesMultiplier) sleepMultiplier++; //TODO remove
+    while (isBatcherRunning()) { // we only loop back here if something fatal happened to our stream
+      try (WALEntryStream entryStream = new WALEntryStream(replicationQueueInfo, logQueue, fs, conf,
+          this.currentPosition, filter)) {
+        while (isBatcherRunning()) { // keep reusing stream while we can
+          List<Entry> entries = new ArrayList<>(replicationBatchNbCapacity);
+          int currentHeapUsage, currentNbRowKeys, currentNbHFiles;
+          currentHeapUsage = currentNbRowKeys = currentNbHFiles = 0;
+          while (entryStream.hasNext()) {
+            Entry entry = entryStream.next();
+            entries.add(entry);
+            WALEdit edit = entry.getEdit();
+            if (edit != null && edit.size() != 0) {
+              currentHeapUsage += edit.heapSize();
+              currentHeapUsage += calculateTotalSizeOfStoreFiles(edit);
+              Pair<Integer, Integer> nbRowsAndHFiles = countDistinctRowKeysAndHFiles(edit);
+              currentNbRowKeys += nbRowsAndHFiles.getFirst();
+              currentNbHFiles += nbRowsAndHFiles.getSecond();
+            }
+            // Stop if too many entries or too big
+            // FIXME check the relationship between single wal group and overall
+            if (currentHeapUsage >= replicationBatchSizeCapacity
+                || entries.size() >= replicationBatchNbCapacity) {
+              break;
+            }
+          }
+          currentPosition = entryStream.getPosition();
+          if (entries.size() > 0 || this.currentPosition != entryStream.getPosition()) {
+            LOG.debug(
+              String.format("Read %s WAL entries eligible for replication", entries.size()));
+            WALEntryBatch batch = new WALEntryBatch(entries, entryStream.getCurrentPath(),
+                currentPosition,
+                currentHeapUsage, currentNbRowKeys, currentNbHFiles);
+            entryBatchQueue.put(batch);
+            sleepMultiplier = 1;
+          } else {
+            LOG.trace("Didn't read any new entries from WAL");
+            if (sleepMultiplier < maxRetriesMultiplier) sleepMultiplier++; // TODO remove
+          }
+          Thread.sleep(sleepForRetries * sleepMultiplier);
+          entryStream.reset(); // reuse stream
         }
-        Thread.sleep(sleepForRetries * sleepMultiplier);
-      } catch (IOException | WALEntryStreamRuntimeException e) {
-        LOG.warn("Failed to read replication entry batch", e);
+      } catch (IOException | WALEntryStreamRuntimeException e) { // stream related
+        LOG.warn("Failed to read stream of replication entries", e);
         Threads.sleep(sleepForRetries * sleepMultiplier);
       } catch (InterruptedException e) {
         LOG.trace("Interrupted while reading replication entry batch");
-      }      
+      }
+      if (sleepMultiplier < maxRetriesMultiplier) sleepMultiplier++;
+      Threads.sleep(sleepForRetries * sleepMultiplier);
     }
   }
   
@@ -112,37 +144,6 @@ public class ReplicationWALEntryBatcher extends Thread {
   
   public WALEntryBatch take() throws InterruptedException {
     return entryBatchQueue.take();
-  }
-
-  private WALEntryBatch readBatch() throws IOException {   
-    try (WALEntryStream entryStream = new WALEntryStream(replicationQueueInfo, logQueue, fs, conf, this.currentPosition, filter)) {
-      List<Entry> entries = new ArrayList<>(replicationBatchNbCapacity);
-      int currentSize = 0;
-      int currentNbRowKeys = 0;
-      int currentNbHFiles = 0;
-      while (entryStream.hasNext()) {
-        Entry entry = entryStream.next();        
-        currentSize += entry.getEdit().heapSize();
-        currentSize += calculateTotalSizeOfStoreFiles(entry.getEdit());
-        Pair<Integer, Integer> nbRowsAndHFiles = countDistinctRowKeysAndHFiles(entry.getEdit());
-        currentNbRowKeys += nbRowsAndHFiles.getFirst();
-        currentNbHFiles += nbRowsAndHFiles.getSecond();
-        entries.add(entry);        
-        // Stop if too many entries or too big
-        // FIXME check the relationship between single wal group and overall
-        if (currentSize >= replicationBatchNbCapacity
-            || entries.size() >= replicationBatchSizeCapacity) {
-          break;
-        }
-      }
-      WALEntryBatch batch = null;
-      currentPosition = entryStream.getPosition();
-      if (entries.size() > 0 || this.currentPosition != entryStream.getPosition()) {
-        LOG.debug(String.format("Read %s WAL entries eligible for replication", entries.size()));
-        batch = new WALEntryBatch(entries, entryStream.getCurrentPath(), currentPosition, currentSize, currentNbRowKeys, currentNbHFiles);
-      }
-      return batch;      
-    }
   }
   
   /**
@@ -216,15 +217,15 @@ public class ReplicationWALEntryBatcher extends Thread {
   /**
    * @return the workerRunning
    */
-  public boolean isWorkerRunning() {
-    return this.workerRunning;
+  public boolean isBatcherRunning() {
+    return this.batcherRunning;
   }
 
   /**
    * @param workerRunning the workerRunning to set
    */
   public void setWorkerRunning(boolean workerRunning) {
-    this.workerRunning = workerRunning;
+    this.batcherRunning = workerRunning;
   }
 
   public static class WALEntryBatch {
